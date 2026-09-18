@@ -1,27 +1,31 @@
 --[[
-    ModFocusRise v2.6 - Focus Aim for Monster Hunter Rise (REFramework)
+    ModFocusRise v2.7 - Focus Aim for Monster Hunter Rise (REFramework)
 
-    v2.3: 무기 구별은 일단 보류하고, Better Focus Mode의 11종 근접무기
-    correction window 평균값을 모든 무기에 공통 적용합니다.
+    v2.7 구조:
+      - v1.8의 검증된 "행동 중 카메라 방향 추적" 방식을 기반으로 합니다.
+      - LALT 집중모드 중 이동/회전이 감지되면 카메라 방향을 계속 따라갑니다.
+      - 공격 입력(마우스 L/R)이 시작되면 그 순간의 방향을 잠그고,
+        현재 무기에 해당하는 Better Focus Timing 동안 그 방향을 유지합니다.
+      - 공격 고정 시간이 끝나면 다시 일반 카메라 추적으로 돌아갑니다.
+      - 무기별 Timing은 자동 적용하거나 개별 수정할 수 있습니다.
 
-    평균 = 2.16 / 11 = 0.19636초 → 기본값 0.196초.
+    Better Focus Mode Timing:
+      GreatSword=0.24
+      LongSword=0.18
+      ChargeBlade=0.22
+      SwordAndShield=0.16
+      DualBlades=0.14
+      Hammer=0.24
+      HuntingHorn=0.22
+      Lance=0.18
+      Gunlance=0.20
+      SwitchAxe=0.20
+      InsectGlaive=0.18
 
-    현재 기능:
-      - LALT로 집중모드 활성화
-      - 이동만으로는 회전하지 않음
-      - 공격 시작 시 카메라 방향을 저장
-      - 평균 correction window 동안 저장 방향으로 보정
-      - window 종료 후 일반 게임 회전에 반환
-
-    v2.2의 무기 자동 판별/내부 필드 진단 코드는 제거했습니다.
-    오버레이도 실제 사용에 필요한 항목만 남겼습니다.
-
-    v2.6:
-      - v2.5의 BFM 상태 실험은 유지합니다.
-      - Better Focus Mode의 11종 Timing을 무기별로 자동 적용할 수 있습니다.
-      - 자동 감지가 불확실하면 수동 무기를 선택할 수 있습니다.
-      - 각 무기 Timing은 설정창에서 개별 수정할 수 있습니다.
-]]
+    주의:
+      - 무기 감지는 _WeaponMain의 런타임 타입명을 기준으로 합니다.
+      - 타입명이 예상과 다르면 "수동 무기" 모드를 사용할 수 있습니다.
+--]]
 
 --==========================================================================
 -- 1. 설정
@@ -29,23 +33,57 @@
 
 local CFG_PATH = "ModFocusRise.json"
 
---==========================================================================
--- Better Focus Mode Timing
--- 원본에서 제공된 11종 근접무기 값
---==========================================================================
-local WEAPON_TIMINGS_DEFAULT = {
-    GreatSword     = 0.24,
-    LongSword      = 0.18,
-    ChargeBlade    = 0.22,
-    SwordAndShield = 0.16,
-    DualBlades     = 0.14,
-    Hammer         = 0.24,
-    HuntingHorn    = 0.22,
-    Lance          = 0.18,
-    Gunlance       = 0.20,
-    SwitchAxe      = 0.20,
-    InsectGlaive   = 0.18,
+local DEFAULTS = {
+    enabled        = true,
+    mode           = 1,       -- 1 = 홀드, 2 = 토글
+    key            = 0xA4,
+    key_name       = "Menu",  -- via.hid.KeyboardKey.Menu = LALT
+
+    smooth         = 0.35,
+    yaw_offset     = 0.0,
+
+    debug          = false,
+    apply_rotation = false,
+
+    -- v1.8 스타일: 움직이거나 회전할 때만 평상시 카메라 추적
+    activity_gate          = true,
+    activity_pos_threshold = 0.01,
+    activity_yaw_threshold = 0.015,
+    activity_hold_frames   = 12,
+
+    -- 무기별 Timing
+    auto_weapon_timing = true,
+    manual_weapon      = "GreatSword",
+    generic_window_seconds = 0.196,
+
+    great_sword_window_seconds      = 0.24,
+    long_sword_window_seconds       = 0.18,
+    charge_blade_window_seconds     = 0.22,
+    sword_and_shield_window_seconds = 0.16,
+    dual_blades_window_seconds      = 0.14,
+    hammer_window_seconds            = 0.24,
+    hunting_horn_window_seconds     = 0.22,
+    lance_window_seconds             = 0.18,
+    gunlance_window_seconds          = 0.20,
+    switch_axe_window_seconds        = 0.20,
+    insect_glaive_window_seconds     = 0.18,
+
+    -- 공격 고정 시간 종료 후 바로 일반 추적으로 복귀
+    post_window_hold_seconds = 0.00,
 }
+
+local cfg = json.load_file(CFG_PATH) or {}
+for k, v in pairs(DEFAULTS) do
+    if cfg[k] == nil then cfg[k] = v end
+end
+
+local function save_cfg()
+    json.dump_file(CFG_PATH, cfg)
+end
+
+--==========================================================================
+-- 2. 무기 Timing
+--==========================================================================
 
 local WEAPON_LABELS = {
     GreatSword     = "대검",
@@ -59,92 +97,69 @@ local WEAPON_LABELS = {
     Gunlance       = "건랜스",
     SwitchAxe      = "슬래시액스",
     InsectGlaive   = "조충곤",
-    Generic        = "수동/미감지",
+    Generic        = "미감지/기본",
 }
 
 local WEAPON_ORDER = {
-    "GreatSword", "LongSword", "ChargeBlade", "SwordAndShield",
-    "DualBlades", "Hammer", "HuntingHorn", "Lance", "Gunlance",
-    "SwitchAxe", "InsectGlaive"
+    "GreatSword",
+    "LongSword",
+    "ChargeBlade",
+    "SwordAndShield",
+    "DualBlades",
+    "Hammer",
+    "HuntingHorn",
+    "Lance",
+    "Gunlance",
+    "SwitchAxe",
+    "InsectGlaive",
 }
 
--- Rise 내부 _WeaponMain 타입명에 대한 보수적 후보.
--- 실제 타입명이 다르면 자동 감지는 Generic이 되고 수동 선택을 사용할 수 있습니다.
+local WEAPON_TIMINGS = {
+    GreatSword     = 0.24,
+    LongSword      = 0.18,
+    ChargeBlade    = 0.22,
+    SwordAndShield = 0.16,
+    DualBlades     = 0.14,
+    Hammer         = 0.24,
+    HuntingHorn    = 0.22,
+    Lance          = 0.18,
+    Gunlance       = 0.20,
+    SwitchAxe      = 0.20,
+    InsectGlaive   = 0.18,
+}
+
 local WEAPON_PATTERNS = {
-    { key = "GreatSword",     patterns = { "GreatSword", "Greatsword", "GS" } },
-    { key = "LongSword",      patterns = { "LongSword", "Longsword", "LS" } },
+    { key = "GreatSword",     patterns = { "GreatSword", "Greatsword" } },
+    { key = "LongSword",      patterns = { "LongSword", "Longsword" } },
     { key = "ChargeBlade",    patterns = { "ChargeAxe", "ChargeBlade", "Chargeblade" } },
     { key = "SwordAndShield", patterns = { "ShortSword", "SwordAndShield", "SwordShield" } },
-    { key = "DualBlades",     patterns = { "DualBlades", "DualBlade", "TwinSword" } },
+    { key = "DualBlades",     patterns = { "DualBlades", "DualBlade" } },
     { key = "Hammer",         patterns = { "Hammer" } },
     { key = "HuntingHorn",    patterns = { "HuntingHorn", "Horn" } },
-    { key = "Lance",          patterns = { "GunLance", "Gunlance" } },
-    { key = "Lance",          patterns = { "Lance" } },
     { key = "Gunlance",       patterns = { "GunLance", "Gunlance" } },
-    { key = "SwitchAxe",      patterns = { "SlashAxe", "SwitchAxe", "SwitchAxe" } },
+    { key = "Lance",          patterns = { "Lance" } },
+    { key = "SwitchAxe",      patterns = { "SlashAxe", "SwitchAxe" } },
     { key = "InsectGlaive",   patterns = { "InsectGlaive", "Insect" } },
 }
 
-local DEFAULTS = {
-    enabled        = true,
-    mode           = 1,
-    key            = 0xA4,
-    key_name       = "Menu",   -- via.hid.KeyboardKey.Menu = LALT
-    smooth         = 0.20,
-    yaw_offset     = 0.0,
-
-    debug          = false,
-    apply_rotation = false,
-
-    -- 기본 correction window
-    correction_window_seconds = 0.196,
-
-    -- 무기별 자동 Timing
-    auto_weapon_timing = true,
-    manual_weapon = "GreatSword",
-
-    -- 원본 Better Focus Timing을 개별 수정 가능
-    great_sword_window_seconds      = 0.24,
-    long_sword_window_seconds       = 0.18,
-    charge_blade_window_seconds     = 0.22,
-    sword_and_shield_window_seconds = 0.16,
-    dual_blades_window_seconds      = 0.14,
-    hammer_window_seconds            = 0.24,
-    hunting_horn_window_seconds     = 0.22,
-    lance_window_seconds             = 0.18,
-    gunlance_window_seconds          = 0.20,
-    switch_axe_window_seconds        = 0.20,
-    insect_glaive_window_seconds     = 0.18,
-
-    -- 기본 0.00: correction window 종료 후 즉시 게임 회전에 반환
-    post_window_hold_seconds = 0.00,
-
-    -- v2.5: BFM 구조 실험. 기본 ON. 실제 호환 멤버가 없으면 자동 fallback.
-    use_bfm_state_api = true,
-}
-
-local cfg = json.load_file(CFG_PATH) or {}
-for k, v in pairs(DEFAULTS) do
-    if cfg[k] == nil then cfg[k] = v end
+local function refresh_weapon_timings()
+    WEAPON_TIMINGS.GreatSword     = cfg.great_sword_window_seconds
+    WEAPON_TIMINGS.LongSword      = cfg.long_sword_window_seconds
+    WEAPON_TIMINGS.ChargeBlade    = cfg.charge_blade_window_seconds
+    WEAPON_TIMINGS.SwordAndShield = cfg.sword_and_shield_window_seconds
+    WEAPON_TIMINGS.DualBlades     = cfg.dual_blades_window_seconds
+    WEAPON_TIMINGS.Hammer         = cfg.hammer_window_seconds
+    WEAPON_TIMINGS.HuntingHorn    = cfg.hunting_horn_window_seconds
+    WEAPON_TIMINGS.Lance          = cfg.lance_window_seconds
+    WEAPON_TIMINGS.Gunlance       = cfg.gunlance_window_seconds
+    WEAPON_TIMINGS.SwitchAxe      = cfg.switch_axe_window_seconds
+    WEAPON_TIMINGS.InsectGlaive  = cfg.insect_glaive_window_seconds
 end
 
-local function save_cfg()
-    json.dump_file(CFG_PATH, cfg)
-end
+refresh_weapon_timings()
 
 --==========================================================================
--- 2. 키 표시
---==========================================================================
-
-local function key_display_name()
-    if cfg.key_name == "Menu" then
-        return "LALT"
-    end
-    return tostring(cfg.key_name or "Menu")
-end
-
---==========================================================================
--- 3. Keyboard 입력
+-- 3. 키 입력
 --==========================================================================
 
 local kb_singleton, kb_tdef, kb_key_tdef
@@ -174,9 +189,14 @@ local function get_key_value(name)
     local ok, value = pcall(function()
         return field:get_data(nil)
     end)
-    if not ok then return nil end
 
+    if not ok then return nil end
     return value
+end
+
+local function key_display_name()
+    if cfg.key_name == "Menu" then return "LALT" end
+    return tostring(cfg.key_name or "Menu")
 end
 
 local function get_bound_key_value()
@@ -220,6 +240,7 @@ local function capture_key()
     for _, field in ipairs(kb_key_tdef:get_fields()) do
         if field:is_static() then
             local name = field:get_name()
+
             local ok_value, value = pcall(function()
                 return field:get_data(nil)
             end)
@@ -247,7 +268,7 @@ local function capture_key()
 end
 
 --==========================================================================
--- 4. Mouse 입력
+-- 4. 마우스 입력
 --==========================================================================
 
 local mouse_singleton, mouse_tdef, mouse_button_tdef
@@ -319,120 +340,14 @@ local function update_attack_input()
     mouse_prev_l = l
     mouse_prev_r = r
 
-    return trg_l or trg_r, l, r
+    return trg_l or trg_r
 end
 
 --==========================================================================
 -- 5. Player / Camera / Weapon
 --==========================================================================
 
-local function refresh_weapon_timing_config()
-    WEAPON_TIMINGS_DEFAULT.GreatSword     = cfg.great_sword_window_seconds
-    WEAPON_TIMINGS_DEFAULT.LongSword      = cfg.long_sword_window_seconds
-    WEAPON_TIMINGS_DEFAULT.ChargeBlade    = cfg.charge_blade_window_seconds
-    WEAPON_TIMINGS_DEFAULT.SwordAndShield = cfg.sword_and_shield_window_seconds
-    WEAPON_TIMINGS_DEFAULT.DualBlades     = cfg.dual_blades_window_seconds
-    WEAPON_TIMINGS_DEFAULT.Hammer         = cfg.hammer_window_seconds
-    WEAPON_TIMINGS_DEFAULT.HuntingHorn    = cfg.hunting_horn_window_seconds
-    WEAPON_TIMINGS_DEFAULT.Lance          = cfg.lance_window_seconds
-    WEAPON_TIMINGS_DEFAULT.Gunlance       = cfg.gunlance_window_seconds
-    WEAPON_TIMINGS_DEFAULT.SwitchAxe     = cfg.switch_axe_window_seconds
-    WEAPON_TIMINGS_DEFAULT.InsectGlaive  = cfg.insect_glaive_window_seconds
-end
-
-local current_weapon_key = "Generic"
-local current_weapon_type_name = "(unknown)"
-local current_window_seconds = 0.196
-local weapon_detect_error = nil
-
 local function get_player()
-    local pm = sdk.get_managed_singleton("snow.player.PlayerManager")
-    if not pm then return nil end
-    return pm:call("findMasterPlayer")
-end
-
-local function get_main_weapon(player)
-    player = player or get_player()
-    if not player then return nil end
-
-    local ok, weapon = pcall(function()
-        return player:get_field("_WeaponMain")
-    end)
-
-    if not ok then
-        weapon_detect_error = tostring(weapon)
-        return nil
-    end
-
-    return weapon
-end
-
-local function get_weapon_type_name(weapon)
-    if not weapon then return nil end
-
-    local ok, name = pcall(function()
-        local td = weapon:get_type_definition()
-        if not td then return nil end
-        return td:get_name()
-    end)
-
-    if not ok then
-        weapon_detect_error = tostring(name)
-        return nil
-    end
-
-    return name
-end
-
-local function detect_weapon_key(player)
-    if not cfg.auto_weapon_timing then
-        return cfg.manual_weapon or "GreatSword"
-    end
-
-    local weapon = get_main_weapon(player)
-    local type_name = get_weapon_type_name(weapon)
-
-    current_weapon_type_name = type_name or "(unknown)"
-
-    if not type_name then
-        return "Generic"
-    end
-
-    for _, item in ipairs(WEAPON_PATTERNS) do
-        for _, pattern in ipairs(item.patterns) do
-            if string.find(type_name, pattern, 1, true) then
-                return item.key
-            end
-        end
-    end
-
-    return "Generic"
-end
-
-local function update_weapon_profile(player)
-    refresh_weapon_timing_config()
-
-    local key = detect_weapon_key(player)
-    current_weapon_key = key
-
-    if key == "Generic" then
-        current_window_seconds = cfg.correction_window_seconds
-    else
-        current_window_seconds = WEAPON_TIMINGS_DEFAULT[key] or cfg.correction_window_seconds
-    end
-
-    return current_window_seconds
-end
-
-local function get_window_seconds(player)
-    return update_weapon_profile(player)
-end
-
---==========================================================================
--- 5.1 Player Transform / Camera
---==========================================================================
-
-local function get_transform(obj)
     local pm = sdk.get_managed_singleton("snow.player.PlayerManager")
     if not pm then return nil end
     return pm:call("findMasterPlayer")
@@ -466,225 +381,88 @@ local function get_camera_transform()
     return get_transform(cam)
 end
 
---==========================================================================
--- 6.5. BFM 스타일 상태 API 탐색/접근 (실험)
---
--- 중요: 이 코드는 MHW의 BFM 함수를 Rise에 "동일하다고 단정"하지 않습니다.
--- Rise PlayerBase에 실제로 같은 이름의 메서드/필드가 존재하고, 호출/대입
--- 시그니처가 안전하게 확인될 때만 사용합니다.
---==========================================================================
+local weapon_type_name = "(unknown)"
+local current_weapon_key = "Generic"
+local current_window_seconds = 0.196
+local weapon_detect_error = nil
 
-local bfm_api = {
-    initialized = false,
-    type_name = "(unknown)",
-    methods = {},
-    fields = {},
-    setter = nil,
-    getter = nil,
-    detected = false,
-    last_error = nil,
-}
+local function get_main_weapon(player)
+    if not player then return nil end
 
-local BFM_GETTERS = {
-    "TryGetFacingDirection",
-    "get_FacingDirection",
-    "get_TargetDirection",
-    "get_StartRotation",
-}
+    local ok, weapon = pcall(function()
+        return player:get_field("_WeaponMain")
+    end)
 
-local BFM_SETTERS = {
-    "set_FacingDirection",
-    "set_TargetDirection",
-    "set_StartRotation",
-}
-
-local BFM_ZERO_METHODS = {
-    "BeginCorrection",
-    "ShouldRefreshCorrection",
-}
-
-local function get_type_name_safe(td)
-    if not td then return nil end
-    local ok, name = pcall(function() return td:get_name() end)
-    if ok then return name end
-    return nil
-end
-
-local function method_num_params_safe(m)
-    local ok, n = pcall(function() return m:get_num_params() end)
-    if ok and type(n) == "number" then return n end
-    return nil
-end
-
-local function find_method_in_chain(td, name)
-    local cur = td
-    local guard = 0
-    while cur and guard < 12 do
-        local ok, m = pcall(function() return cur:get_method(name) end)
-        if ok and m then return m end
-        local ok_parent, parent = pcall(function() return cur:get_parent_type() end)
-        if not ok_parent then break end
-        cur = parent
-        guard = guard + 1
+    if not ok then
+        weapon_detect_error = tostring(weapon)
+        return nil
     end
-    return nil
+
+    return weapon
 end
 
-local function find_field_in_chain(td, name)
-    local cur = td
-    local guard = 0
-    while cur and guard < 12 do
-        local ok, f = pcall(function() return cur:get_field(name) end)
-        if ok and f then return f end
-        local ok_parent, parent = pcall(function() return cur:get_parent_type() end)
-        if not ok_parent then break end
-        cur = parent
-        guard = guard + 1
+local function get_weapon_type_name(weapon)
+    if not weapon then
+        weapon_type_name = "(unknown)"
+        return nil
     end
-    return nil
+
+    local ok, name = pcall(function()
+        local td = weapon:get_type_definition()
+        if not td then return nil end
+        return td:get_name()
+    end)
+
+    if not ok then
+        weapon_detect_error = tostring(name)
+        weapon_type_name = "(error)"
+        return nil
+    end
+
+    weapon_type_name = name or "(unknown)"
+    return name
 end
 
-local function init_bfm_api(player)
-    if bfm_api.initialized and bfm_api.detected then return end
-    if not player then return end
+local function detect_weapon_key(player)
+    if not cfg.auto_weapon_timing then
+        return cfg.manual_weapon or "GreatSword"
+    end
 
-    local ok_td, td = pcall(function() return player:get_type_definition() end)
-    if not ok_td or not td then return end
+    local weapon = get_main_weapon(player)
+    local type_name = get_weapon_type_name(weapon)
 
-    bfm_api.initialized = true
-    bfm_api.type_name = get_type_name_safe(td) or "(unknown)"
-    bfm_api.methods = {}
-    bfm_api.fields = {}
-    bfm_api.setter = nil
-    bfm_api.getter = nil
-    bfm_api.detected = false
-    bfm_api.last_error = nil
+    if not type_name then
+        return "Generic"
+    end
 
-    for _, name in ipairs(BFM_GETTERS) do
-        local m = find_method_in_chain(td, name)
-        if m then
-            local n = method_num_params_safe(m)
-            bfm_api.methods[name] = { method = m, params = n }
-            -- getter로 안전하게 부를 수 있는 것은 0-인자만 사용
-            if bfm_api.getter == nil and n == 0 and name ~= "TryGetFacingDirection" then
-                bfm_api.getter = name
-            elseif bfm_api.getter == nil and n == 0 then
-                bfm_api.getter = name
+    for _, item in ipairs(WEAPON_PATTERNS) do
+        for _, pattern in ipairs(item.patterns) do
+            if string.find(type_name, pattern, 1, true) then
+                return item.key
             end
         end
     end
 
-    for _, name in ipairs(BFM_SETTERS) do
-        local m = find_method_in_chain(td, name)
-        if m then
-            local n = method_num_params_safe(m)
-            bfm_api.methods[name] = { method = m, params = n }
-            if bfm_api.setter == nil and n == 1 then
-                bfm_api.setter = name
-            end
-        end
-    end
-
-    for _, name in ipairs(BFM_ZERO_METHODS) do
-        local m = find_method_in_chain(td, name)
-        if m then
-            local n = method_num_params_safe(m)
-            bfm_api.methods[name] = { method = m, params = n }
-        end
-    end
-
-    for _, name in ipairs({
-        "facingDirection", "targetDirection", "startRotation",
-        "FacingDirection", "TargetDirection", "StartRotation",
-        "_FacingDirection", "_TargetDirection", "_StartRotation"
-    }) do
-        local f = find_field_in_chain(td, name)
-        if f then
-            local ok_static, is_static = pcall(function() return f:is_static() end)
-            if not ok_static or not is_static then
-                bfm_api.fields[name] = f
-            end
-        end
-    end
-
-    bfm_api.detected = (bfm_api.getter ~= nil or bfm_api.setter ~= nil or next(bfm_api.fields) ~= nil)
+    return "Generic"
 end
 
-local function read_bfm_direction(player)
-    if not cfg.use_bfm_state_api then return nil end
-    init_bfm_api(player)
-    if not bfm_api.detected then return nil end
+local function update_weapon_profile(player)
+    refresh_weapon_timings()
 
-    -- 1) zero-arg getter: 반환값이 Vector3/Quaternion 형태일 때 채택
-    if bfm_api.getter then
-        local ok, value = pcall(function() return player:call(bfm_api.getter) end)
-        if ok and value ~= nil then
-            local ok_x, x = pcall(function() return value.x end)
-            local ok_z, z = pcall(function() return value.z end)
-            if ok_x and ok_z and x ~= nil and z ~= nil then
-                return { x = x, y = (value.y or 0.0), z = z, source = "method:" .. bfm_api.getter }
-            end
-        end
+    local key = detect_weapon_key(player)
+    current_weapon_key = key
+
+    if key == "Generic" then
+        current_window_seconds = cfg.generic_window_seconds
+    else
+        current_window_seconds = WEAPON_TIMINGS[key] or cfg.generic_window_seconds
     end
 
-    -- 2) 실제 Vector3 방향 필드가 있으면 읽기
-    for name, field in pairs(bfm_api.fields) do
-        local ok, value = pcall(function() return field:get_data(player) end)
-        if ok and value ~= nil then
-            local ok_x, x = pcall(function() return value.x end)
-            local ok_z, z = pcall(function() return value.z end)
-            if ok_x and ok_z and x ~= nil and z ~= nil then
-                return { x = x, y = (value.y or 0.0), z = z, source = "field:" .. name }
-            end
-        end
-    end
-
-    return nil
-end
-
-local function try_set_bfm_direction(player, direction)
-    if not cfg.use_bfm_state_api then return false end
-    init_bfm_api(player)
-    if not bfm_api.detected then return false end
-
-    -- Vector3 방향 setter만 보수적으로 시도.
-    if bfm_api.setter then
-        local vec_ok, vec = pcall(function()
-            return Vector3f.new(direction.x, direction.y, direction.z)
-        end)
-        if vec_ok and vec then
-            local ok = pcall(function() player:call(bfm_api.setter, vec) end)
-            if ok then return true end
-        end
-    end
-
-    -- 정확한 이름의 Vector3 필드가 실제로 존재하면 직접 대입.
-    for name, field in pairs(bfm_api.fields) do
-        if name:lower():find("facing", 1, true) or name:lower():find("target", 1, true) then
-            local vec_ok, vec = pcall(function()
-                return Vector3f.new(direction.x, direction.y, direction.z)
-            end)
-            if vec_ok and vec then
-                local ok = pcall(function() field:set_data(player, vec) end)
-                if ok then return true end
-            end
-        end
-    end
-
-    return false
-end
-
-local function bfm_zero_arg_call(player, name)
-    local item = bfm_api.methods[name]
-    if not item or item.params ~= 0 then return nil end
-    local ok, result = pcall(function() return player:call(name) end)
-    if ok then return result end
-    return nil
+    return current_window_seconds
 end
 
 --==========================================================================
-
--- 7. 수학
+-- 6. 수학 / 상태
 --==========================================================================
 
 local function yaw_from_quat(q)
@@ -694,7 +472,6 @@ local function yaw_from_quat(q)
     )
 end
 
--- REFramework Quaternion.new는 (w, x, y, z)
 local function quat_from_yaw(yaw)
     local h = yaw * 0.5
     return Quaternion.new(
@@ -711,31 +488,31 @@ local function wrap_pi(a)
     return a
 end
 
---==========================================================================
--- 8. 상태
---==========================================================================
-
 local focus_active = false
 local toggle_state = false
-local binding_key  = false
+local binding_key = false
 
-local attack_correction_active = false
+local activity_active = false
+local activity_frames_left = 0
+local activity_initialized = false
+local activity_last_pos = nil
+local activity_last_yaw = nil
+
+-- 공격 시작 순간의 yaw를 고정
+local attack_lock_active = false
 local attack_locked_yaw = nil
-local attack_window_remaining = 0.0
-local current_window_seconds = 0.196
+local attack_lock_remaining = 0.0
 local attack_triggered = false
+
 local post_window_hold_remaining = 0.0
-local attack_locked_direction = nil
-local bfm_state_applied = false
 
 local last_error = nil
 local apply_count = 0
 local frame_id = 0
 local last_apply_frame = -1
 
--- 게임의 실제 DeltaTime을 사용해 초 단위 correction window 유지.
--- 실패 시 60 FPS 기준으로 fallback.
 local app_singleton, app_tdef
+
 local function get_delta_time()
     if not app_singleton then
         app_singleton = sdk.get_native_singleton("via.Application")
@@ -746,6 +523,7 @@ local function get_delta_time()
         local ok, dt = pcall(function()
             return sdk.call_native_func(app_singleton, app_tdef, "get_DeltaTime")
         end)
+
         if ok and type(dt) == "number" and dt > 0.0 and dt < 0.25 then
             return dt
         end
@@ -754,18 +532,92 @@ local function get_delta_time()
     return 1.0 / 60.0
 end
 
-local function reset_attack_correction()
-    attack_correction_active = false
+local function reset_activity()
+    activity_active = false
+    activity_frames_left = 0
+    activity_initialized = false
+    activity_last_pos = nil
+    activity_last_yaw = nil
+end
+
+local function reset_attack_lock()
+    attack_lock_active = false
     attack_locked_yaw = nil
-    attack_window_remaining = 0.0
-    attack_triggered = false
+    attack_lock_remaining = 0.0
     post_window_hold_remaining = 0.0
-    attack_locked_direction = nil
-    bfm_state_applied = false
+    attack_triggered = false
+end
+
+local function copy_vec3(v)
+    return {
+        x = v.x,
+        y = v.y,
+        z = v.z,
+    }
+end
+
+local function update_activity()
+    if not cfg.activity_gate then
+        activity_active = true
+        return true
+    end
+
+    local player = get_player()
+    local ptr = get_transform(player)
+
+    if not ptr then
+        activity_active = false
+        return false
+    end
+
+    local ok, result = pcall(function()
+        local pos = ptr:call("get_Position")
+        local rot = ptr:call("get_Rotation")
+        local yaw = yaw_from_quat(rot)
+
+        if not activity_initialized or not activity_last_pos or activity_last_yaw == nil then
+            activity_last_pos = copy_vec3(pos)
+            activity_last_yaw = yaw
+            activity_initialized = true
+            activity_active = false
+            return false
+        end
+
+        local dx = pos.x - activity_last_pos.x
+        local dy = pos.y - activity_last_pos.y
+        local dz = pos.z - activity_last_pos.z
+
+        local moved =
+            (dx * dx + dy * dy + dz * dz) >=
+            (cfg.activity_pos_threshold * cfg.activity_pos_threshold)
+
+        local yaw_delta = math.abs(wrap_pi(yaw - activity_last_yaw))
+        local rotated = yaw_delta >= cfg.activity_yaw_threshold
+
+        activity_last_pos = copy_vec3(pos)
+        activity_last_yaw = yaw
+
+        if moved or rotated then
+            activity_frames_left = cfg.activity_hold_frames
+        elseif activity_frames_left > 0 then
+            activity_frames_left = activity_frames_left - 1
+        end
+
+        activity_active = activity_frames_left > 0
+        return activity_active
+    end)
+
+    if not ok then
+        last_error = "activity: " .. tostring(result)
+        activity_active = false
+        return false
+    end
+
+    return result
 end
 
 --==========================================================================
--- 9. 상태 머신
+-- 7. 입력 / 상태 업데이트
 --==========================================================================
 
 re.on_frame(function()
@@ -778,7 +630,8 @@ re.on_frame(function()
         end
 
         focus_active = false
-        reset_attack_correction()
+        reset_activity()
+        reset_attack_lock()
         return
     end
 
@@ -788,7 +641,8 @@ re.on_frame(function()
         key_prev_down = false
         mouse_prev_l = false
         mouse_prev_r = false
-        reset_attack_correction()
+        reset_activity()
+        reset_attack_lock()
         return
     end
 
@@ -806,18 +660,26 @@ re.on_frame(function()
         attack_trg = update_attack_input()
     end
 
-    if focus_active and attack_trg then
-        local ok, err = pcall(function()
-            local player = get_player()
-            local ptr = get_transform(player)
-            local ctr = get_camera_transform()
+    if not focus_active then
+        reset_activity()
+        reset_attack_lock()
+        return
+    end
 
+    -- 공격 시작: 이 순간의 카메라 방향을 고정
+    if attack_trg then
+        local player = get_player()
+        local ptr = get_transform(player)
+        local ctr = get_camera_transform()
+
+        local ok, err = pcall(function()
             if not player or not ptr or not ctr then
                 return false
             end
 
             local ppos = ptr:call("get_Position")
             local cpos = ctr:call("get_Position")
+
             local dx = ppos.x - cpos.x
             local dz = ppos.z - cpos.z
 
@@ -825,22 +687,17 @@ re.on_frame(function()
                 return false
             end
 
-            -- 공격이 시작되는 바로 그 순간의 카메라 방향을 저장.
-            attack_locked_yaw = math.atan(dx, dz) + cfg.yaw_offset
-            attack_locked_direction = {
-                x = math.sin(attack_locked_yaw),
-                y = 0.0,
-                z = math.cos(attack_locked_yaw),
-            }
+            attack_locked_yaw =
+                math.atan(dx, dz) + cfg.yaw_offset
 
-            -- BFM 방식 1차 실험: Rise에 동일 역할의 setter가 실제 존재하면
-            -- 캐릭터의 facing/target 상태 자체를 카메라 방향으로 바꿉니다.
-            bfm_state_applied = try_set_bfm_direction(player, attack_locked_direction)
+            update_weapon_profile(player)
 
-            current_window_seconds = math.max(0.01, get_window_seconds(player))
-            attack_window_remaining = current_window_seconds
-            attack_correction_active = true
+            attack_lock_remaining =
+                math.max(0.01, current_window_seconds)
+
+            attack_lock_active = true
             attack_triggered = true
+
             return true
         end)
 
@@ -849,57 +706,52 @@ re.on_frame(function()
         end
     end
 
-    -- 시간 기반 correction window. 실제 게임 DeltaTime을 사용.
-    if attack_correction_active then
-        attack_window_remaining = attack_window_remaining - get_delta_time()
+    -- 공격 고정 시간이 끝날 때까지 감소
+    if attack_lock_active then
+        attack_lock_remaining =
+            attack_lock_remaining - get_delta_time()
 
-        if attack_window_remaining <= 0.0 then
-            attack_window_remaining = 0.0
-            attack_correction_active = false
+        if attack_lock_remaining <= 0.0 then
+            attack_lock_remaining = 0.0
+            attack_lock_active = false
+
             if cfg.post_window_hold_seconds > 0.0 then
-                post_window_hold_remaining = cfg.post_window_hold_seconds
+                post_window_hold_remaining =
+                    cfg.post_window_hold_seconds
             else
                 attack_locked_yaw = nil
             end
         end
     elseif post_window_hold_remaining > 0.0 then
-        post_window_hold_remaining = post_window_hold_remaining - get_delta_time()
+        post_window_hold_remaining =
+            post_window_hold_remaining - get_delta_time()
+
         if post_window_hold_remaining <= 0.0 then
             post_window_hold_remaining = 0.0
             attack_locked_yaw = nil
         end
     end
+
+    -- 공격 중이 아니면 v1.8식 활동 감지로 평상시 추적 여부 결정
+    if not attack_lock_active and post_window_hold_remaining <= 0.0 then
+        update_activity()
+    end
 end)
 
 --==========================================================================
--- 10. APPLY - 공격 시작 방향 유지
+-- 8. APPLY
 --==========================================================================
 
-local function apply_locked_yaw()
-    if not attack_correction_active and post_window_hold_remaining <= 0.0 then return end
-    if attack_locked_yaw == nil then return end
-    if not cfg.apply_rotation then return end
-
+local function apply_yaw(target_yaw)
     local player = get_player()
     if not player then return end
-
-    -- BFM 스타일 direct state가 성공하면 우선 그것을 유지한다.
-    if bfm_state_applied and attack_locked_direction then
-        local ok = try_set_bfm_direction(player, attack_locked_direction)
-        if ok then
-            apply_count = apply_count + 1
-            return
-        end
-        -- setter가 더 이상 작동하지 않으면 이 공격에서는 Transform fallback.
-        bfm_state_applied = false
-    end
 
     local ptr = get_transform(player)
     if not ptr then return end
 
     local current_rotation = ptr:call("get_Rotation")
     local cur_yaw = yaw_from_quat(current_rotation)
-    local diff = wrap_pi(attack_locked_yaw - cur_yaw)
+    local diff = wrap_pi(target_yaw - cur_yaw)
 
     local delta_yaw
     if cfg.smooth <= 0.001 then
@@ -908,33 +760,98 @@ local function apply_locked_yaw()
         delta_yaw = diff * (1.0 - cfg.smooth)
     end
 
+    -- 한 번의 적용에서 너무 큰 회전은 제한
     local max_step = math.pi * 0.5
     if delta_yaw > max_step then delta_yaw = max_step end
     if delta_yaw < -max_step then delta_yaw = -max_step end
 
     local yaw_delta_quat = quat_from_yaw(delta_yaw)
-    local new_rotation = (yaw_delta_quat * current_rotation):normalized()
+    local new_rotation =
+        (yaw_delta_quat * current_rotation):normalized()
 
     ptr:call("set_Rotation", new_rotation)
     apply_count = apply_count + 1
 end
 
 re.on_pre_application_entry("LockScene", function()
-    if not attack_correction_active and post_window_hold_remaining <= 0.0 then return end
+    if not focus_active then return end
     if not cfg.apply_rotation then return end
 
-    if last_apply_frame == frame_id then return end
-    last_apply_frame = frame_id
+    -- 공격 고정 중에는 활동 감지와 무관하게 저장된 방향 유지
+    if attack_lock_active and attack_locked_yaw ~= nil then
+        if last_apply_frame == frame_id then return end
+        last_apply_frame = frame_id
 
-    local ok, err = pcall(apply_locked_yaw)
+        local ok, err = pcall(function()
+            apply_yaw(attack_locked_yaw)
+        end)
+
+        if not ok then
+            last_error = "attack apply: " .. tostring(err)
+        end
+
+        return
+    end
+
+    if post_window_hold_remaining > 0.0
+        and attack_locked_yaw ~= nil then
+
+        if last_apply_frame == frame_id then return end
+        last_apply_frame = frame_id
+
+        local ok, err = pcall(function()
+            apply_yaw(attack_locked_yaw)
+        end)
+
+        if not ok then
+            last_error = "post hold apply: " .. tostring(err)
+        end
+
+        return
+    end
+
+    -- 공격이 없을 때는 v1.8 스타일 활동 중에만 카메라 추적
+    if cfg.activity_gate and not activity_active then
+        return
+    end
+
+    local ok, err = pcall(function()
+        local player = get_player()
+        local ptr = get_transform(player)
+        local ctr = get_camera_transform()
+
+        if not player or not ptr or not ctr then
+            return
+        end
+
+        local ppos = ptr:call("get_Position")
+        local cpos = ctr:call("get_Position")
+
+        local dx = ppos.x - cpos.x
+        local dz = ppos.z - cpos.z
+
+        if (dx * dx + dz * dz) < 0.0001 then
+            return
+        end
+
+        local target_yaw =
+            math.atan(dx, dz) + cfg.yaw_offset
+
+        if last_apply_frame == frame_id then
+            return
+        end
+
+        last_apply_frame = frame_id
+        apply_yaw(target_yaw)
+    end)
+
     if not ok then
-        last_error = "apply rotation: " .. tostring(err)
+        last_error = "normal apply: " .. tostring(err)
     end
 end)
 
 --==========================================================================
---==========================================================================
--- 11. UI
+-- 9. UI
 --==========================================================================
 
 re.on_draw_ui(function()
@@ -943,37 +860,110 @@ re.on_draw_ui(function()
     local changed, val
 
     changed, val = imgui.checkbox("모드 활성화", cfg.enabled)
-    if changed then cfg.enabled = val; save_cfg() end
+    if changed then
+        cfg.enabled = val
+        save_cfg()
+    end
 
-    changed, val = imgui.combo("작동 방식", cfg.mode, {
-        "홀드 (누르는 동안만)",
-        "토글"
-    })
+    changed, val = imgui.combo(
+        "작동 방식",
+        cfg.mode,
+        { "홀드 (누르는 동안만)", "토글" }
+    )
     if changed then
         cfg.mode = val
         toggle_state = false
-        reset_attack_correction()
+        reset_attack_lock()
         save_cfg()
     end
 
     imgui.text("현재 키: " .. key_display_name())
     imgui.same_line()
+
     if binding_key then
         imgui.text("  << 아무 키나 누르세요 (ESC 취소)")
     elseif imgui.button("키 변경") then
         binding_key = true
     end
 
-    changed, val = imgui.slider_float("부드러움", cfg.smooth, 0.0, 0.95, "%.2f")
-    if changed then cfg.smooth = val; save_cfg() end
+    changed, val = imgui.slider_float(
+        "부드러움",
+        cfg.smooth,
+        0.0,
+        0.95,
+        "%.2f"
+    )
+    if changed then
+        cfg.smooth = val
+        save_cfg()
+    end
 
-    changed, val = imgui.slider_float("Yaw 보정(rad)", cfg.yaw_offset, -3.15, 3.15, "%.3f")
-    if changed then cfg.yaw_offset = val; save_cfg() end
+    changed, val = imgui.slider_float(
+        "Yaw 보정(rad)",
+        cfg.yaw_offset,
+        -3.15,
+        3.15,
+        "%.3f"
+    )
+    if changed then
+        cfg.yaw_offset = val
+        save_cfg()
+    end
+
+    changed, val = imgui.checkbox(
+        "행동할 때만 평상시 추적",
+        cfg.activity_gate
+    )
+    if changed then
+        cfg.activity_gate = val
+        reset_activity()
+        save_cfg()
+    end
+
+    if cfg.activity_gate then
+        changed, val = imgui.slider_float(
+            "움직임 감도(m)",
+            cfg.activity_pos_threshold,
+            0.001,
+            0.05,
+            "%.3f"
+        )
+        if changed then
+            cfg.activity_pos_threshold = val
+            save_cfg()
+        end
+
+        changed, val = imgui.slider_float(
+            "회전 감도(rad)",
+            cfg.activity_yaw_threshold,
+            0.001,
+            0.10,
+            "%.3f"
+        )
+        if changed then
+            cfg.activity_yaw_threshold = val
+            save_cfg()
+        end
+
+        changed, val = imgui.slider_int(
+            "추적 유지 프레임",
+            cfg.activity_hold_frames,
+            1,
+            60
+        )
+        if changed then
+            cfg.activity_hold_frames = val
+            save_cfg()
+        end
+    end
 
     imgui.separator()
-    imgui.text("공격 시작 보정")
+    imgui.text("공격 시작 방향 고정")
 
-    changed, val = imgui.checkbox("무기별 자동 타이밍", cfg.auto_weapon_timing)
+    changed, val = imgui.checkbox(
+        "무기별 자동 타이밍",
+        cfg.auto_weapon_timing
+    )
     if changed then
         cfg.auto_weapon_timing = val
         save_cfg()
@@ -981,17 +971,22 @@ re.on_draw_ui(function()
 
     if cfg.auto_weapon_timing then
         local seconds = update_weapon_profile()
+
         imgui.text(
             "현재 무기: " ..
             (WEAPON_LABELS[current_weapon_key] or current_weapon_key)
         )
-        imgui.text("자동 보정 시간: " .. string.format("%.3f초", seconds))
-        imgui.text("내부 타입: " .. tostring(current_weapon_type_name))
+
+        imgui.text(
+            "보정 시간: " ..
+            string.format("%.3f초", seconds)
+        )
     else
-        local current_manual_index = 1
+        local manual_index = 1
+
         for i, key in ipairs(WEAPON_ORDER) do
             if key == cfg.manual_weapon then
-                current_manual_index = i
+                manual_index = i
                 break
             end
         end
@@ -1001,91 +996,128 @@ re.on_draw_ui(function()
             table.insert(labels, WEAPON_LABELS[key])
         end
 
-        changed, val = imgui.combo("수동 무기", current_manual_index, labels)
+        changed, val = imgui.combo(
+            "수동 무기",
+            manual_index,
+            labels
+        )
+
         if changed then
             cfg.manual_weapon = WEAPON_ORDER[val]
             update_weapon_profile()
             save_cfg()
         end
 
-        current_window_seconds = update_weapon_profile()
-        imgui.text("선택 무기 보정 시간: " .. string.format("%.3f초", current_window_seconds))
+        imgui.text(
+            "보정 시간: " ..
+            string.format("%.3f초", current_window_seconds)
+        )
     end
 
     changed, val = imgui.slider_float(
         "미감지/기본 보정 시간(초)",
-        cfg.correction_window_seconds,
+        cfg.generic_window_seconds,
         0.05,
         0.50,
         "%.3f"
     )
-    if changed then cfg.correction_window_seconds = val; save_cfg() end
-
-    imgui.text("Better Focus Timing")
-
-    local timing_items = {
-        {"great_sword_window_seconds", "대검", 0.24},
-        {"long_sword_window_seconds", "태도", 0.18},
-        {"charge_blade_window_seconds", "차지액스", 0.22},
-        {"sword_and_shield_window_seconds", "한손검", 0.16},
-        {"dual_blades_window_seconds", "쌍검", 0.14},
-        {"hammer_window_seconds", "해머", 0.24},
-        {"hunting_horn_window_seconds", "수렵피리", 0.22},
-        {"lance_window_seconds", "랜스", 0.18},
-        {"gunlance_window_seconds", "건랜스", 0.20},
-        {"switch_axe_window_seconds", "슬래시액스", 0.20},
-        {"insect_glaive_window_seconds", "조충곤", 0.18},
-    }
-
-    for _, item in ipairs(timing_items) do
-        local key = item[1]
-        local label = item[2]
-        changed, val = imgui.slider_float(
-            label .. "##timing",
-            cfg[key],
-            0.05,
-            0.50,
-            "%.3f초"
-        )
-        if changed then
-            cfg[key] = val
-            refresh_weapon_timing_config()
-            save_cfg()
-        end
+    if changed then
+        cfg.generic_window_seconds = val
+        save_cfg()
     end
 
-    changed, val = imgui.checkbox("BFM 방식 상태값 시도", cfg.use_bfm_state_api)
-    if changed then cfg.use_bfm_state_api = val; save_cfg() end
+    imgui.separator()
 
-    changed, val = imgui.checkbox("디버그 표시", cfg.debug)
-    if changed then cfg.debug = val; save_cfg() end
+    changed, val = imgui.checkbox(
+        "디버그 표시",
+        cfg.debug
+    )
+    if changed then
+        cfg.debug = val
+        save_cfg()
+    end
 
-    changed, val = imgui.checkbox("회전 적용", cfg.apply_rotation)
-    if changed then cfg.apply_rotation = val; save_cfg() end
+    changed, val = imgui.checkbox(
+        "회전 적용",
+        cfg.apply_rotation
+    )
+    if changed then
+        cfg.apply_rotation = val
+        save_cfg()
+    end
 
     if cfg.debug then
+        update_weapon_profile()
+
         imgui.text("focus_active: " .. tostring(focus_active))
         imgui.text("player: " .. tostring(get_player() ~= nil))
         imgui.text("camera: " .. tostring(get_camera_transform() ~= nil))
-        imgui.text("correction active: " .. tostring(attack_correction_active))
-        imgui.text("window remaining: " .. string.format("%.3f", attack_window_remaining) .. " sec")
-        imgui.text("weapon: " .. tostring(WEAPON_LABELS[current_weapon_key] or current_weapon_key))
-        imgui.text("weapon type: " .. tostring(current_weapon_type_name))
-        imgui.text("weapon window: " .. string.format("%.3f", current_window_seconds) .. " sec")
-        imgui.text("apply_rotation: " .. tostring(cfg.apply_rotation))
-        imgui.text("BFM API detected: " .. tostring(bfm_api.detected))
-        imgui.text("BFM type: " .. tostring(bfm_api.type_name))
-        imgui.text("BFM getter: " .. tostring(bfm_api.getter))
-        imgui.text("BFM setter: " .. tostring(bfm_api.setter))
-        imgui.text("BFM state applied: " .. tostring(bfm_state_applied))
-        if bfm_api.last_error then imgui.text("BFM error: " .. tostring(bfm_api.last_error)) end
-        if last_error then imgui.text("last error: " .. last_error) end
+
+        imgui.text(
+            "activity_active: " ..
+            tostring(activity_active)
+        )
+
+        imgui.text(
+            "attack lock: " ..
+            tostring(attack_lock_active)
+        )
+
+        imgui.text(
+            "attack remaining: " ..
+            string.format("%.3f초", attack_lock_remaining)
+        )
+
+        imgui.text(
+            "weapon: " ..
+            tostring(
+                WEAPON_LABELS[current_weapon_key] or
+                current_weapon_key
+            )
+        )
+
+        imgui.text(
+            "weapon type: " ..
+            tostring(weapon_type_name)
+        )
+
+        imgui.text(
+            "weapon window: " ..
+            string.format("%.3f초", current_window_seconds)
+        )
+
+        imgui.text(
+            "apply_count: " ..
+            tostring(apply_count)
+        )
+
+        if input_error then
+            imgui.text("input error: " .. input_error)
+        end
+
+        if mouse_error then
+            imgui.text("mouse error: " .. mouse_error)
+        end
+
+        if weapon_detect_error then
+            imgui.text(
+                "weapon error: " ..
+                weapon_detect_error
+            )
+        end
+
+        if last_error then
+            imgui.text("last error: " .. last_error)
+        end
     end
 
     imgui.tree_pop()
 end)
 
 log.info(
-    "[ModFocusRise v2.6] loaded. window=" ..
-    tostring(cfg.correction_window_seconds) .. " sec, auto_weapon_timing=" .. tostring(cfg.auto_weapon_timing) .. ", key=" .. tostring(key_display_name())
+    "[ModFocusRise v2.7] loaded. " ..
+    "auto_weapon_timing=" ..
+    tostring(cfg.auto_weapon_timing) ..
+    ", key=" ..
+    tostring(key_display_name())
 )
