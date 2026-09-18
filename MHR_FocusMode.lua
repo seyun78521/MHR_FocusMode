@@ -1,7 +1,7 @@
 --[[
-    ModFocusRise v2.1 - Focus Aim for Monster Hunter Rise (REFramework)
+    ModFocusRise v2.2 - Focus Aim for Monster Hunter Rise (REFramework)
 
-    v2.1: Better Focus Mode의 무기별 correction window 시간을 반영.
+    v2.2: 무기 자동 판별 추측을 제거하고, 수동 무기 프로필 + Rise 내부 무기/회전 필드 진단을 추가.
 
     기본 타이밍(원본 Better Focus Mode 설정값):
       GreatSword          0.24 s
@@ -25,10 +25,10 @@
       6) 공격 중 카메라가 계속 움직여도 저장 방향은 자동으로 바뀌지 않음
 
     주의:
-      - Rise의 내부 무기 클래스명은 버전에 따라 다를 수 있어 자동 감지는
-        _WeaponMain의 타입명을 기반으로 보수적으로 판별합니다.
-      - 자동 감지가 안 되면 Generic(0.20초)로 동작하며 디버그 창에서
-        현재 무기 타입명을 확인할 수 있습니다.
+      - v2.2에서는 Rise 내부 무기 클래스명을 추측해 자동 매핑하지 않습니다.
+      - 수동 무기 프로필을 선택하면 Better Focus의 해당 correction window를 확실히 사용합니다.
+      - 디버그를 켜면 _WeaponMain의 실제 타입/후보 필드/메서드를 로그로 덤프합니다.
+        이 정보로 다음 버전에서 Rise의 진짜 무기 자동 감지를 고정할 수 있습니다.
       - autorun 폴더에는 테스트 시 이 파일 하나만 넣는 것을 권장합니다.
 --]]
 
@@ -78,8 +78,10 @@ local DEFAULTS = {
     debug          = false,
     apply_rotation = false,
 
-    auto_weapon_timing = true,
+    auto_weapon_timing = false,
+    manual_weapon = "GreatSword",
     generic_window_seconds = 0.20,
+    post_window_hold_seconds = 0.00, -- 0 = 사용 안 함; 공격 후 원래 방향 복귀를 확인하기 위한 실험값
 
     -- 아래 값들은 원본 Better Focus Mode의 Timing 섹션을 그대로 반영.
     great_sword_window_seconds      = 0.24,
@@ -374,67 +376,117 @@ local function get_weapon_type_name(weapon)
 end
 
 --==========================================================================
--- 6. 무기 자동 감지
+-- 6. 무기 프로필 / Rise 내부 진단
 --==========================================================================
 
-local weapon_patterns = {
-    { key = "GreatSword",     patterns = { "GreatSword" } },
-    { key = "LongSword",      patterns = { "LongSword" } },
-    { key = "ChargeBlade",    patterns = { "ChargeAxe", "ChargeBlade" } },
-    { key = "SwordAndShield", patterns = { "ShortSword", "SwordAndShield" } },
-    { key = "DualBlades",     patterns = { "DualBlades" } },
-    { key = "Hammer",         patterns = { "Hammer" } },
-    { key = "HuntingHorn",    patterns = { "Horn", "HuntingHorn" } },
-    { key = "Lance",          patterns = { "Lance" } },
-    { key = "Gunlance",       patterns = { "GunLance", "Gunlance" } },
-    { key = "SwitchAxe",      patterns = { "SlashAxe", "SwitchAxe" } },
-    { key = "InsectGlaive",   patterns = { "InsectGlaive" } },
+-- v2.2에서는 자동 타입명 매칭을 기본으로 사용하지 않습니다.
+-- _WeaponMain의 존재는 Rise용 공개 유틸에서도 확인되지만, 객체 type name이
+-- 실제 무기 종류명을 그대로 담는다는 보장이 없어 수동 프로필을 우선합니다.
+
+local current_weapon_key = "GreatSword"
+local current_weapon_type_name = "(manual profile)"
+local current_weapon_seconds = 0.24
+
+local weapon_profile_names = {
+    GreatSword     = "대검",
+    LongSword      = "태도",
+    ChargeBlade    = "차지액스",
+    SwordAndShield = "한손검",
+    DualBlades     = "쌍검",
+    Hammer         = "해머",
+    HuntingHorn    = "수렵피리",
+    Lance          = "랜스",
+    Gunlance       = "건랜스",
+    SwitchAxe      = "슬래시액스",
+    InsectGlaive   = "조충곤",
+    Generic        = "기타",
 }
 
-local current_weapon_key = "Generic"
-local current_weapon_type_name = "(unknown)"
-local current_weapon_seconds = 0.20
-
-local function detect_weapon_key()
-    if not cfg.auto_weapon_timing then
-        return "Generic"
+local function selected_window_seconds()
+    if cfg.auto_weapon_timing then
+        -- v2.2에서는 자동 감지하지 않으므로 Generic을 안전값으로 사용.
+        return cfg.generic_window_seconds
     end
-
-    local weapon = get_main_weapon()
-    local type_name = get_weapon_type_name(weapon)
-    current_weapon_type_name = type_name or "(unknown)"
-
-    if not type_name then
-        return "Generic"
-    end
-
-    for _, item in ipairs(weapon_patterns) do
-        for _, pattern in ipairs(item.patterns) do
-            if string.find(type_name, pattern, 1, true) then
-                return item.key
-            end
-        end
-    end
-
-    return "Generic"
+    return WEAPON_TIMINGS[cfg.manual_weapon] or cfg.generic_window_seconds
 end
 
 local function update_weapon_profile()
-    current_weapon_key = detect_weapon_key()
-
-    if current_weapon_key == "Generic" then
+    if cfg.auto_weapon_timing then
+        current_weapon_key = "Generic"
         current_weapon_seconds = cfg.generic_window_seconds
+        current_weapon_type_name = "(auto disabled in v2.2)"
     else
+        current_weapon_key = cfg.manual_weapon or "GreatSword"
         current_weapon_seconds = WEAPON_TIMINGS[current_weapon_key] or cfg.generic_window_seconds
+        current_weapon_type_name = "(manual: " .. current_weapon_key .. ")"
     end
 end
 
-local function get_window_seconds()
-    update_weapon_profile()
-    return current_weapon_seconds
+update_weapon_profile()
+
+local diagnostics_dumped = false
+local function safe_type_name(obj)
+    if not obj then return "(nil)" end
+    local ok, name = pcall(function()
+        local td = obj:get_type_definition()
+        return td and td:get_name() or "(no type)"
+    end)
+    return ok and name or "(type error: " .. tostring(name) .. ")"
 end
 
---==========================================================================
+local function dump_candidates(label, td, patterns)
+    if not td then return end
+    for _, field in ipairs(td:get_fields()) do
+        local n = field:get_name()
+        local low = string.lower(n)
+        for _, p in ipairs(patterns) do
+            if string.find(low, p, 1, true) then
+                log.info("[ModFocusRise v2.2] " .. label .. " FIELD " .. n)
+                break
+            end
+        end
+    end
+    for _, method in ipairs(td:get_methods()) do
+        local n = method:get_name()
+        local low = string.lower(n)
+        for _, p in ipairs(patterns) do
+            if string.find(low, p, 1, true) then
+                log.info("[ModFocusRise v2.2] " .. label .. " METHOD " .. n)
+                break
+            end
+        end
+    end
+end
+
+local function dump_runtime_diagnostics()
+    if diagnostics_dumped then return end
+    local player = get_player()
+    local weapon = get_main_weapon(player)
+
+    log.info("[ModFocusRise v2.2] ===== RUNTIME DIAGNOSTIC BEGIN =====")
+    log.info("[ModFocusRise v2.2] player type=" .. safe_type_name(player))
+    log.info("[ModFocusRise v2.2] _WeaponMain=" .. tostring(weapon))
+    log.info("[ModFocusRise v2.2] _WeaponMain type=" .. safe_type_name(weapon))
+
+    if player then
+        local ptd = player:get_type_definition()
+        dump_candidates("PlayerBase", ptd, {
+            "angle", "direction", "rotation", "weapon", "action", "motion", "fsm"
+        })
+    end
+
+    if weapon then
+        local wtd = weapon:get_type_definition()
+        dump_candidates("WeaponMain", wtd, {
+            "weapon", "type", "id", "action", "motion"
+        })
+    end
+
+    log.info("[ModFocusRise v2.2] ===== RUNTIME DIAGNOSTIC END =====")
+    diagnostics_dumped = true
+end
+
+--=========================================================================
 -- 7. 수학
 --==========================================================================
 
@@ -475,6 +527,7 @@ local attack_locked_yaw = nil
 local attack_window_remaining = 0.0
 local attack_triggered = false
 local attack_window_started_for_weapon = "Generic"
+local post_window_hold_remaining = 0.0
 
 local last_error = nil
 local apply_count = 0
@@ -508,6 +561,7 @@ local function reset_attack_correction()
     attack_window_remaining = 0.0
     attack_triggered = false
     attack_window_started_for_weapon = "Generic"
+    post_window_hold_remaining = 0.0
 end
 
 --==========================================================================
@@ -547,6 +601,10 @@ re.on_frame(function()
         focus_active = key_down()
     end
 
+    if cfg.debug then
+        pcall(dump_runtime_diagnostics)
+    end
+
     local attack_trg = false
     if get_mouse() ~= nil then
         attack_trg = update_attack_input()
@@ -573,14 +631,8 @@ re.on_frame(function()
 
             -- 공격이 시작되는 바로 그 순간의 카메라 방향을 저장.
             attack_locked_yaw = math.atan(dx, dz) + cfg.yaw_offset
-            current_weapon_key = detect_weapon_key()
-            current_weapon_type_name = current_weapon_type_name or "(unknown)"
-
-            if current_weapon_key == "Generic" then
-                current_weapon_seconds = cfg.generic_window_seconds
-            else
-                current_weapon_seconds = WEAPON_TIMINGS[current_weapon_key] or cfg.generic_window_seconds
-            end
+            update_weapon_profile()
+            current_weapon_type_name = safe_type_name(get_main_weapon(player))
 
             attack_window_remaining = math.max(0.01, current_weapon_seconds)
             attack_window_started_for_weapon = current_weapon_key
@@ -601,6 +653,16 @@ re.on_frame(function()
         if attack_window_remaining <= 0.0 then
             attack_window_remaining = 0.0
             attack_correction_active = false
+            if cfg.post_window_hold_seconds > 0.0 then
+                post_window_hold_remaining = cfg.post_window_hold_seconds
+            else
+                attack_locked_yaw = nil
+            end
+        end
+    elseif post_window_hold_remaining > 0.0 then
+        post_window_hold_remaining = post_window_hold_remaining - get_delta_time()
+        if post_window_hold_remaining <= 0.0 then
+            post_window_hold_remaining = 0.0
             attack_locked_yaw = nil
         end
     end
@@ -611,7 +673,7 @@ end)
 --==========================================================================
 
 local function apply_locked_yaw()
-    if not attack_correction_active then return end
+    if not attack_correction_active and post_window_hold_remaining <= 0.0 then return end
     if attack_locked_yaw == nil then return end
     if not cfg.apply_rotation then return end
 
@@ -644,7 +706,7 @@ local function apply_locked_yaw()
 end
 
 re.on_pre_application_entry("LockScene", function()
-    if not attack_correction_active then return end
+    if not attack_correction_active and post_window_hold_remaining <= 0.0 then return end
     if not cfg.apply_rotation then return end
 
     if last_apply_frame == frame_id then return end
@@ -697,34 +759,43 @@ re.on_draw_ui(function()
     imgui.separator()
     imgui.text("Better Focus식 무기별 공격 보정")
 
-    changed, val = imgui.checkbox("무기별 자동 타이밍", cfg.auto_weapon_timing)
+    local weapon_items = {
+        "GreatSword", "LongSword", "ChargeBlade", "SwordAndShield", "DualBlades",
+        "Hammer", "HuntingHorn", "Lance", "Gunlance", "SwitchAxe", "InsectGlaive"
+    }
+    local weapon_labels = {
+        "대검", "태도", "차지액스", "한손검", "쌍검", "해머", "수렵피리",
+        "랜스", "건랜스", "슬래시액스", "조충곤"
+    }
+
+    local manual_index = 1
+    for i, name in ipairs(weapon_items) do
+        if name == cfg.manual_weapon then manual_index = i break end
+    end
+
+    changed, val = imgui.combo("무기 프로필", manual_index, weapon_labels)
     if changed then
-        cfg.auto_weapon_timing = val
+        cfg.manual_weapon = weapon_items[val]
+        update_weapon_profile()
         reset_attack_correction()
         save_cfg()
     end
 
-    if cfg.auto_weapon_timing then
-        imgui.text("현재 무기: " .. (WEAPON_LABELS[current_weapon_key] or current_weapon_key))
-        imgui.text("보정 시간: " .. string.format("%.2f초", current_weapon_seconds))
-    else
-        changed, val = imgui.slider_float(
-            "기본 보정 시간(초)",
-            cfg.generic_window_seconds,
-            0.05,
-            0.50,
-            "%.2f"
-        )
-        if changed then cfg.generic_window_seconds = val; save_cfg() end
+    imgui.text("선택된 보정 시간: " .. string.format("%.2f초", current_weapon_seconds))
+    imgui.text("자동 무기 감지는 현재 비활성화(v2.2)")
+
+    changed, val = imgui.slider_float(
+        "공격 후 방향 유지(실험, 초)",
+        cfg.post_window_hold_seconds,
+        0.0,
+        1.0,
+        "%.2f"
+    )
+    if changed then
+        cfg.post_window_hold_seconds = val
+        save_cfg()
     end
-
-    imgui.text("대검 0.24 / 태도 0.18 / 차지액스 0.22")
-    imgui.text("한손검 0.16 / 쌍검 0.14 / 해머 0.24")
-    imgui.text("피리 0.22 / 랜스 0.18 / 건랜스 0.20")
-    imgui.text("슬액 0.20 / 조충곤 0.18")
-
-    changed, val = imgui.slider_float("미감지 무기 기본(초)", cfg.generic_window_seconds, 0.05, 0.50, "%.2f")
-    if changed then cfg.generic_window_seconds = val; save_cfg() end
+    imgui.text("0.00 = correction window 종료와 함께 게임 회전에 반환")
 
     changed, val = imgui.checkbox("디버그 표시", cfg.debug)
     if changed then cfg.debug = val; save_cfg() end
@@ -749,12 +820,14 @@ re.on_draw_ui(function()
         imgui.text("player: " .. tostring(get_player() ~= nil))
         imgui.text("camera: " .. tostring(get_camera_transform() ~= nil))
 
-        imgui.text("weapon: " .. tostring(WEAPON_LABELS[current_weapon_key] or current_weapon_key))
-        imgui.text("weapon type: " .. tostring(current_weapon_type_name))
+        imgui.text("weapon profile: " .. tostring(weapon_profile_names[current_weapon_key] or current_weapon_key))
+        imgui.text("_WeaponMain type: " .. tostring(current_weapon_type_name))
         imgui.text("window: " .. string.format("%.3f", current_weapon_seconds) .. " sec")
         imgui.text("window remaining: " .. string.format("%.3f", attack_window_remaining) .. " sec")
+        imgui.text("post hold remaining: " .. string.format("%.3f", post_window_hold_remaining) .. " sec")
         imgui.text("correction active: " .. tostring(attack_correction_active))
         imgui.text("attack locked yaw: " .. tostring(attack_locked_yaw))
+        imgui.text("diagnostics dumped: " .. tostring(diagnostics_dumped))
         imgui.text("apply_rotation: " .. tostring(cfg.apply_rotation))
         imgui.text("apply_count: " .. tostring(apply_count))
 
@@ -767,6 +840,6 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[ModFocusRise v2.1] loaded. key=" .. tostring(key_display_name()) ..
+    "[ModFocusRise v2.2] loaded. key=" .. tostring(key_display_name()) ..
     ", auto_weapon_timing=" .. tostring(cfg.auto_weapon_timing)
 )
