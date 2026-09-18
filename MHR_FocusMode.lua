@@ -70,15 +70,12 @@ local DEFAULTS = {
     smooth         = 0.35,
     yaw_offset     = 0.0,
 
-    debug          = false,
+    debug          = false,  -- 기본: 체크 해제
     apply_rotation = true,
 
     -- 무기 Timing은 항상 자동 인식.
     -- 무기가 인식되지 않을 때만 아래 Generic 값을 사용합니다.
     generic_window_seconds = 0.196,
-
-    -- 공격 고정 시간 종료 후 바로 일반 추적으로 복귀
-    post_window_hold_seconds = 0.00,
 
     -- 공격 모션 중 원래 방향으로 되돌아가는 프레임을 줄이기 위한 소폭의 여유 시간.
     -- UI에는 노출하지 않고 내부에서만 적용합니다.
@@ -129,20 +126,6 @@ local WEAPON_LABELS = {
     Generic        = "미감지/기본",
 }
 
-local WEAPON_ORDER = {
-    "GreatSword",
-    "LongSword",
-    "ChargeBlade",
-    "SwordAndShield",
-    "DualBlades",
-    "Hammer",
-    "HuntingHorn",
-    "Lance",
-    "Gunlance",
-    "SwitchAxe",
-    "InsectGlaive",
-}
-
 local WEAPON_TIMINGS = {
     GreatSword     = 0.24,
     LongSword      = 0.18,
@@ -155,20 +138,6 @@ local WEAPON_TIMINGS = {
     Gunlance       = 0.20,
     SwitchAxe      = 0.20,
     InsectGlaive   = 0.18,
-}
-
-local WEAPON_PATTERNS = {
-    { key = "GreatSword",     patterns = { "GreatSword", "Greatsword" } },
-    { key = "LongSword",      patterns = { "LongSword", "Longsword" } },
-    { key = "ChargeBlade",    patterns = { "ChargeAxe", "ChargeBlade", "Chargeblade" } },
-    { key = "SwordAndShield", patterns = { "ShortSword", "SwordAndShield", "SwordShield" } },
-    { key = "DualBlades",     patterns = { "DualBlades", "DualBlade" } },
-    { key = "Hammer",         patterns = { "Hammer" } },
-    { key = "HuntingHorn",    patterns = { "HuntingHorn", "Horn" } },
-    { key = "Gunlance",       patterns = { "GunLance", "Gunlance" } },
-    { key = "Lance",          patterns = { "Lance" } },
-    { key = "SwitchAxe",      patterns = { "SlashAxe", "SwitchAxe" } },
-    { key = "InsectGlaive",   patterns = { "InsectGlaive", "Insect" } },
 }
 
 --==========================================================================
@@ -533,7 +502,6 @@ local binding_key = false
 local attack_lock_active = false
 local attack_locked_yaw = nil
 local attack_lock_remaining = 0.0
-local attack_triggered = false
 
 -- 홀드/탭 구분용. threshold를 넘으면 홀드 공격으로 판정.
 local attack_hold_elapsed = 0.0
@@ -574,7 +542,6 @@ local function reset_attack_lock()
     attack_hold_elapsed = 0.0
     attack_is_hold = false
     attack_handoff_remaining = 0.0
-    attack_triggered = false
 end
 
 local function start_attack_handoff()
@@ -684,7 +651,6 @@ end
 
 re.on_frame(function()
     frame_id = frame_id + 1
-    attack_triggered = false
 
     if binding_key then
         if capture_key() then
@@ -772,7 +738,6 @@ re.on_frame(function()
 
             attack_lock_active = true
             attack_handoff_remaining = 0.0
-            attack_triggered = true
 
             return true
         end)
@@ -1117,7 +1082,7 @@ end)
 --==========================================================================
 
 re.on_draw_ui(function()
-    if not imgui.tree_node("Focus Aim (Rise)") then return end
+    if not imgui.tree_node("MHR_FocusMode") then return end
 
     local changed, val
 
@@ -1148,138 +1113,9 @@ re.on_draw_ui(function()
         binding_key = true
     end
 
-    changed, val = imgui.slider_float(
-        "부드러움",
-        cfg.smooth,
-        0.0,
-        0.95,
-        "%.2f"
-    )
-    if changed then
-        cfg.smooth = val
-        save_cfg()
-    end
-
-    changed, val = imgui.slider_float(
-        "Yaw 보정(rad)",
-        cfg.yaw_offset,
-        -3.15,
-        3.15,
-        "%.3f"
-    )
-    if changed then
-        cfg.yaw_offset = val
-        save_cfg()
-    end
-
     imgui.separator()
-    imgui.text("정지 시 추적 제외 (Activity Gate)")
-
-    changed, val = imgui.checkbox(
-        "가만히 서 있을 때는 추적 안 함",
-        cfg.activity_gate
-    )
-    if changed then
-        cfg.activity_gate = val
-        reset_activity()
-        save_cfg()
-    end
-
-    if cfg.activity_gate then
-        changed, val = imgui.slider_float(
-            "움직임 감도(m)",
-            cfg.activity_pos_threshold,
-            0.001,
-            0.05,
-            "%.3f"
-        )
-        if changed then
-            cfg.activity_pos_threshold = val
-            save_cfg()
-        end
-
-        changed, val = imgui.slider_float(
-            "회전 감도(rad)",
-            cfg.activity_yaw_threshold,
-            0.001,
-            0.10,
-            "%.3f"
-        )
-        if changed then
-            cfg.activity_yaw_threshold = val
-            save_cfg()
-        end
-
-        changed, val = imgui.slider_int(
-            "추적 유지 프레임",
-            cfg.activity_hold_frames,
-            1,
-            60
-        )
-        if changed then
-            cfg.activity_hold_frames = val
-            save_cfg()
-        end
-
-        imgui.text(
-            "※ 공격 고정/handoff는 이 게이트와 무관하게 항상 동작합니다."
-        )
-    end
-
-    imgui.separator()
-    imgui.text("공격 시작 방향 고정")
-
-    update_weapon_profile(get_player())
-
-    imgui.text("BFM Type: " .. tostring(bfm_type_name))
-    imgui.text(
-        "현재 무기: " ..
-        (WEAPON_LABELS[current_weapon_key] or current_weapon_key)
-    )
-    imgui.text(
-        "자동 적용 Timing: " ..
-        string.format("%.3f초", current_window_seconds)
-    )
-    imgui.text(
-        "내부 고정 여유: " ..
-        string.format(
-            "%.3f초",
-            math.max(0.0, cfg.attack_lock_extension_seconds or 0.0)
-        )
-    )
-
-    changed, val = imgui.slider_float(
-        "공격 종료 핸드오프(초)",
-        cfg.attack_handoff_seconds,
-        0.0,
-        0.250,
-        "%.3f"
-    )
-    if changed then
-        cfg.attack_handoff_seconds = val
-        save_cfg()
-    end
-
-    if current_weapon_key == "Generic" then
-        changed, val = imgui.slider_float(
-            "미감지/기본 보정 시간(초)",
-            cfg.generic_window_seconds,
-            0.05,
-            0.50,
-            "%.3f"
-        )
-        if changed then
-            cfg.generic_window_seconds = val
-            current_window_seconds = val
-            save_cfg()
-        end
-
-        imgui.text("※ BFM Type으로 무기를 인식하지 못한 경우입니다.")
-    else
-        imgui.text("※ Timing은 BFM Type 자동 인식으로만 결정됩니다.")
-    end
-
-    imgui.separator()
+    -- 공격 방향 고정 관련 세부 설정은 일반 UI에서 숨깁니다.
+    -- 무기별 자동 Timing 및 공격 고정 로직은 내부에서 그대로 동작합니다.
 
     changed, val = imgui.checkbox(
         "디버그 표시",
@@ -1369,7 +1205,7 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.7] loaded. " ..
+    "[MHR_FocusMode v3.8] loaded. " ..
     "BFM-type-only weapon detection, instant hold-release + persistent HUD reticle" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
