@@ -1,6 +1,6 @@
 --[[
-    ModFocusRise v1.5  -  Focus Aim for Monster Hunter Rise (REFramework)
-    v1.5: Quaternion 인자 순서(w,x,y,z) 수정. v1.4의 뒤집힘 원인 수정
+    ModFocusRise v1.8  -  Focus Aim for Monster Hunter Rise (REFramework)
+    v1.8: 정지 중 회전 추적을 막고, 캐릭터가 이동/회전한 뒤 잠시 동안만 카메라 방향을 따라가도록 활동 감지를 추가.
 
     설치: <MHRise 폴더>/reframework/autorun/ModFocusRise.lua
     설정: 게임 내 REFramework 창(Insert 키) -> "Focus Aim (Rise)" 트리 노드
@@ -19,11 +19,14 @@ local DEFAULTS = {
     enabled     = true,
     mode        = 1,        -- 1 = 홀드, 2 = 토글
     key         = 0xA4,     -- VK_LMENU (LALT)
-    align_to    = 1,        -- 1 = 카메라 정면, 2 = 락온 타겟
     smooth      = 0.35,     -- 0.0 = 즉시 스냅, 1.0 = 거의 안 돌아감
     yaw_offset  = 0.0,      -- 캐릭터가 180도 반대로 보면 3.14159 입력
     debug       = false,
     apply_rotation = false,  -- v1.4: 안전 진단용. 기본 OFF
+    activity_gate = true,     -- v1.8: 이동/행동 중에만 회전 적용
+    activity_pos_threshold = 0.01, -- 프레임당 위치 변화량(미터)
+    activity_yaw_threshold = 0.015, -- 프레임당 회전 변화량(rad)
+    activity_hold_frames = 12, -- 활동 감지 후 회전을 유지할 프레임 수
 }
 
 local cfg = json.load_file(CFG_PATH) or {}
@@ -95,6 +98,16 @@ end
 
 local function key_name_value()
     return cfg.key_name or "Menu"
+end
+
+-- REFramework KeyboardKey의 실제 enum 이름은 Menu지만,
+-- 사용자가 보는 UI에서는 실제 의도한 키인 LALT로 표시합니다.
+local function key_display_name()
+    local name = key_name_value()
+    if name == "Menu" then
+        return "LALT"
+    end
+    return name
 end
 
 local function get_bound_key_value()
@@ -192,15 +205,6 @@ local function get_camera_transform()
     return get_transform(cam)
 end
 
---[[ 락온 타겟.
-     주의: 라이즈의 락온 매니저 타입명은 버전(Rise / Sunbreak)에 따라 다릅니다.
-     REFramework -> DeveloperTools -> ObjectExplorer 에서 "Lockon" 또는 "Camera"
-     로 검색해 실제 싱글톤/필드명을 확인한 뒤 아래를 채워 넣으세요.
-     찾기 전까지는 align_to = 1 (카메라 정면) 모드를 쓰시면 됩니다. --]]
-local function get_target_position()
-    return nil
-end
-
 --==========================================================================
 -- 5. 수학
 --==========================================================================
@@ -230,6 +234,85 @@ local focus_active = false
 local toggle_state = false
 local binding_key  = false      -- 설정창에서 키 입력 대기중인지
 
+-- v1.8 활동 감지 상태
+local activity_active = false
+local activity_frames_left = 0
+local activity_initialized = false
+local activity_last_pos = nil
+local activity_last_yaw = nil
+local last_error = nil
+local apply_count = 0
+local frame_id = 0
+local last_apply_frame = -1
+
+local function reset_activity()
+    activity_active = false
+    activity_frames_left = 0
+    activity_initialized = false
+    activity_last_pos = nil
+    activity_last_yaw = nil
+end
+
+local function copy_vec3(v)
+    return { x = v.x, y = v.y, z = v.z }
+end
+
+local function update_activity()
+    if not cfg.activity_gate then
+        activity_active = true
+        return true
+    end
+
+    local player = get_player()
+    local ptr = get_transform(player)
+    if not ptr then
+        activity_active = false
+        return false
+    end
+
+    local ok, result = pcall(function()
+        local pos = ptr:call("get_Position")
+        local rot = ptr:call("get_Rotation")
+        local yaw = yaw_from_quat(rot)
+
+        if not activity_initialized or not activity_last_pos or activity_last_yaw == nil then
+            activity_last_pos = copy_vec3(pos)
+            activity_last_yaw = yaw
+            activity_initialized = true
+            activity_active = false
+            return false
+        end
+
+        local dx = pos.x - activity_last_pos.x
+        local dy = pos.y - activity_last_pos.y
+        local dz = pos.z - activity_last_pos.z
+        local moved = (dx * dx + dy * dy + dz * dz) >= (cfg.activity_pos_threshold * cfg.activity_pos_threshold)
+
+        local yaw_delta = math.abs(wrap_pi(yaw - activity_last_yaw))
+        local rotated = yaw_delta >= cfg.activity_yaw_threshold
+
+        activity_last_pos = copy_vec3(pos)
+        activity_last_yaw = yaw
+
+        if moved or rotated then
+            activity_frames_left = cfg.activity_hold_frames
+        elseif activity_frames_left > 0 then
+            activity_frames_left = activity_frames_left - 1
+        end
+
+        activity_active = activity_frames_left > 0
+        return activity_active
+    end)
+
+    if not ok then
+        last_error = "activity: " .. tostring(result)
+        activity_active = false
+        return false
+    end
+
+    return result
+end
+
 re.on_frame(function()
     -- 키 바인딩 캡처 모드
     if binding_key then
@@ -237,6 +320,7 @@ re.on_frame(function()
             binding_key = false
         end
         focus_active = false
+        reset_activity()
         return
     end
 
@@ -244,6 +328,7 @@ re.on_frame(function()
         focus_active = false
         toggle_state = false
         key_prev_down = false
+        reset_activity()
         return
     end
 
@@ -252,6 +337,12 @@ re.on_frame(function()
         focus_active = toggle_state
     else
         focus_active = key_down()            -- 누르고 있는 동안만
+    end
+
+    if not focus_active then
+        reset_activity()
+    else
+        update_activity()
     end
 end)
 
@@ -263,11 +354,6 @@ end)
 --   그래도 씹히면 "UpdateMotion" 또는 "BeginRendering" 으로 바꿔 보세요.
 --==========================================================================
 
-local last_error = nil
-local apply_count = 0
-local frame_id = 0
-local last_apply_frame = -1
-
 -- 프레임마다 한 번만 회전 적용.
 -- MHRise 예제에서 Transform 수정은 LockScene의 pre 단계에서 수행됩니다.
 re.on_frame(function()
@@ -277,6 +363,7 @@ end)
 re.on_pre_application_entry("LockScene", function()
     if not focus_active then return end
     if not cfg.apply_rotation then return end
+    if cfg.activity_gate and not activity_active then return end
 
     -- LockScene이 한 프레임에 여러 번 들어오더라도 1회만 적용
     if last_apply_frame == frame_id then return end
@@ -290,18 +377,11 @@ re.on_pre_application_entry("LockScene", function()
         if not ptr then return end
 
         local ppos = ptr:call("get_Position")
-        local dx, dz
-
-        if cfg.align_to == 2 then
-            local tpos = get_target_position()
-            if not tpos then return end
-            dx, dz = tpos.x - ppos.x, tpos.z - ppos.z
-        else
-            local ctr = get_camera_transform()
-            if not ctr then return end
-            local cpos = ctr:call("get_Position")
-            dx, dz = ppos.x - cpos.x, ppos.z - cpos.z
-        end
+        local ctr = get_camera_transform()
+        if not ctr then return end
+        local cpos = ctr:call("get_Position")
+        -- 카메라는 캐릭터 뒤에 있으므로 (플레이어 - 카메라) 가 전방 벡터
+        local dx, dz = ppos.x - cpos.x, ppos.z - cpos.z
 
         if (dx * dx + dz * dz) < 0.0001 then return end
 
@@ -348,7 +428,7 @@ re.on_draw_ui(function()
     changed, val = imgui.combo("작동 방식", cfg.mode, { "홀드 (누르는 동안만)", "토글" })
     if changed then cfg.mode = val; toggle_state = false; save_cfg() end
 
-    imgui.text("현재 키: " .. tostring(key_name_value()))
+    imgui.text("현재 키: " .. tostring(key_display_name()))
     imgui.same_line()
     if binding_key then
         imgui.text("  << 아무 키나 누르세요 (ESC 취소)")
@@ -356,30 +436,44 @@ re.on_draw_ui(function()
         binding_key = true
     end
 
-    changed, val = imgui.combo("정렬 기준", cfg.align_to, { "카메라 정면", "락온 타겟" })
-    if changed then cfg.align_to = val; save_cfg() end
-
     changed, val = imgui.slider_float("부드러움", cfg.smooth, 0.0, 0.95, "%.2f")
     if changed then cfg.smooth = val; save_cfg() end
 
     changed, val = imgui.slider_float("Yaw 보정(rad)", cfg.yaw_offset, -3.15, 3.15, "%.3f")
     if changed then cfg.yaw_offset = val; save_cfg() end
 
+    changed, val = imgui.checkbox("행동할 때만 회전", cfg.activity_gate)
+    if changed then cfg.activity_gate = val; save_cfg(); reset_activity() end
+
+    if cfg.activity_gate then
+        changed, val = imgui.slider_float("움직임 감도(m)", cfg.activity_pos_threshold, 0.001, 0.05, "%.3f")
+        if changed then cfg.activity_pos_threshold = val; save_cfg() end
+
+        changed, val = imgui.slider_float("회전 감도(rad)", cfg.activity_yaw_threshold, 0.001, 0.10, "%.3f")
+        if changed then cfg.activity_yaw_threshold = val; save_cfg() end
+
+        changed, val = imgui.slider_int("추적 유지 프레임", cfg.activity_hold_frames, 1, 60)
+        if changed then cfg.activity_hold_frames = val; save_cfg() end
+    end
+
     changed, val = imgui.checkbox("디버그 표시", cfg.debug)
     if changed then cfg.debug = val; save_cfg() end
 
-    changed, val = imgui.checkbox("회전 적용 (v1.5 진단)", cfg.apply_rotation)
+    changed, val = imgui.checkbox("회전 적용", cfg.apply_rotation)
     if changed then cfg.apply_rotation = val; save_cfg() end
 
     if cfg.debug then
         imgui.text("focus_active: " .. tostring(focus_active))
         imgui.text("keyboard: " .. tostring(get_keyboard() ~= nil))
-        imgui.text("KeyboardKey: " .. tostring(key_name_value()))
+        imgui.text("KeyboardKey: " .. tostring(key_display_name()))
         imgui.text("key value: " .. tostring(get_bound_key_value()))
         imgui.text("key_down: " .. tostring(key_down()))
         imgui.text("player: " .. tostring(get_player() ~= nil))
         imgui.text("camera: " .. tostring(get_camera_transform() ~= nil))
         imgui.text("apply_rotation: " .. tostring(cfg.apply_rotation))
+        imgui.text("activity_gate: " .. tostring(cfg.activity_gate))
+        imgui.text("activity_active: " .. tostring(activity_active))
+        imgui.text("activity_frames_left: " .. tostring(activity_frames_left))
         imgui.text("apply_count: " .. tostring(apply_count))
         if input_error then imgui.text("input error: " .. input_error) end
         if last_error then imgui.text("last error: " .. last_error) end
@@ -388,4 +482,4 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 
-log.info("[ModFocusRise v1.5] loaded. KeyboardKey=" .. tostring(key_name_value()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
+log.info("[ModFocusRise v1.8] loaded. KeyboardKey=" .. tostring(key_display_name()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
