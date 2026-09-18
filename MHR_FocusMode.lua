@@ -1,15 +1,17 @@
 --[[
-    MHR_FocusMode v2.8 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v2.9 - Focus Aim for Monster Hunter Rise (REFramework)
 
-    v2.8 구조:
-      - v2.7의 평상시 "행동 중 카메라 방향 추적"을 그대로 유지합니다.
+    v2.9 구조:
+      - v2.8의 평상시 "행동 중 카메라 방향 추적"을 그대로 유지합니다.
       - 공격 입력(마우스 L/R)이 시작되면 그 순간의 카메라 방향을 저장합니다.
       - 공격 고정 중에는 보간(smooth)을 사용하지 않고 정확한 yaw를 강제합니다.
-      - LockScene 전/후 및 PrepareRendering 전/후에 재적용하여
-        게임 쪽 회전이 중간에 잠깐 덮어쓰는 현상을 줄입니다.
+      - LockScene 전/후 및 PrepareRendering 전/후에 재적용합니다.
+      - 공격 고정 만료 시 Activity가 false가 되는 1프레임 공백을 막기 위해
+        공격 직후 0.100초의 핸드오프 구간을 겹치게 운용합니다.
+      - 핸드오프 구간에는 현재 카메라 방향을 강제로 이어받아 원래 캐릭터 방향을 보지 않습니다.
+      - 공격 고정 시간 자체의 여유도 +0.040초로 늘렸습니다.
       - 무기 Timing은 항상 자동 인식하며, 무기 미감지 시에만 Generic 값을 사용합니다.
-      - 공격 고정 시간에 소폭의 여유(+0.020초)를 추가합니다.
-      - 수동으로 특정 무기를 선택하거나 무기별 Timing을 바꾸는 기능은 제거했습니다.
+      - v2.5의 BFM 상태 API 접근을 복구하고, BFM 무기 타입 진단을 함께 표시합니다.
 
     Better Focus Mode Timing:
       GreatSword=0.24
@@ -25,8 +27,8 @@
       InsectGlaive=0.18
 
     주의:
-      - 무기 감지는 현재 플레이어의 _WeaponMain 런타임 타입명을 기준으로 항상 자동 수행합니다.
-      - 타입명이 매칭되지 않을 때만 Generic(미감지/기본) Timing을 사용합니다.
+      - 무기 감지는 _WeaponMain의 직접/상속 타입명을 자동 탐색합니다.
+      - 타입명이 어느 단계에서도 매칭되지 않을 때만 Generic(미감지/기본) Timing을 사용합니다.
 --]]
 
 --==========================================================================
@@ -57,12 +59,19 @@ local DEFAULTS = {
     -- 무기가 인식되지 않을 때만 아래 Generic 값을 사용합니다.
     generic_window_seconds = 0.196,
 
+    -- v2.5에서 사용하던 BFM 상태 API를 복구합니다.
+    -- 실제 호환되는 Rise 멤버가 있을 때만 적용합니다.
+    use_bfm_state_api = true,
+
     -- 공격 고정 시간 종료 후 바로 일반 추적으로 복귀
     post_window_hold_seconds = 0.00,
 
     -- 공격 모션 중 원래 방향으로 되돌아가는 프레임을 줄이기 위한 소폭의 여유 시간.
     -- UI에는 노출하지 않고 내부에서만 적용합니다.
-    attack_lock_extension_seconds = 0.020,
+    attack_lock_extension_seconds = 0.040,
+
+    -- 공격 고정 -> 평상시 추적 사이를 일부러 겹치게 만들어 1프레임 공백 방지.
+    attack_handoff_seconds = 0.100,
 }
 
 local cfg = json.load_file(CFG_PATH) or {}
@@ -378,6 +387,8 @@ local function get_camera_transform()
 end
 
 local weapon_type_name = "(unknown)"
+local bfm_weapon_type_name = "(unknown)"
+local bfm_weapon_source = "none"
 local current_weapon_key = "Generic"
 local current_window_seconds = 0.196
 local weapon_detect_error = nil
@@ -430,36 +441,214 @@ end
 local function normalize_weapon_type_name(name)
     if not name then return "" end
     local s = tostring(name):lower()
-    -- 런타임 타입명에 namespace / punctuation이 섞여도 매칭되도록 영숫자만 남깁니다.
+    -- namespace / punctuation 제거
     s = s:gsub("[^%w]", "")
     return s
 end
 
-local function detect_weapon_key(player)
-    local weapon = get_main_weapon(player)
-    local type_name = get_weapon_type_name(weapon)
+local function weapon_key_from_type_name(type_name)
+    if not type_name then return nil end
 
-    if not type_name then
-        return "Generic"
+    -- 타입명이 정말 짧은 별칭 그 자체인 경우만 허용합니다.
+    -- 일반 타입명 안의 "GS", "DB" 같은 두 글자를 부분검색하지 않아 오인식을 막습니다.
+    local raw = tostring(type_name)
+    local short_aliases = {
+        GS = "GreatSword", LS = "LongSword", CB = "ChargeBlade",
+        SA = "SwitchAxe", GL = "Gunlance", DB = "DualBlades",
+        HH = "HuntingHorn", IG = "InsectGlaive", SnS = "SwordAndShield",
+    }
+    if short_aliases[raw] then
+        return short_aliases[raw]
     end
 
     local normalized = normalize_weapon_type_name(type_name)
+    if normalized == "" then return nil end
 
-    for _, item in ipairs(WEAPON_PATTERNS) do
+    -- MHRise 데이터에서 실제로 사용되는 무기 클래스명을 지원합니다.
+    local patterns = {
+        { key = "SwordAndShield", patterns = { "ShortSword", "SwordAndShield", "SwordShield" } },
+        { key = "DualBlades",     patterns = { "DualBlades", "DualBlade" } },
+        { key = "ChargeBlade",    patterns = { "ChargeAxe", "ChargeBlade" } },
+        { key = "HuntingHorn",    patterns = { "HuntingHorn", "Horn" } },
+        { key = "InsectGlaive",   patterns = { "InsectGlaive", "Insect" } },
+        { key = "SwitchAxe",      patterns = { "SlashAxe", "SwitchAxe" } },
+        { key = "Gunlance",       patterns = { "GunLance", "Gunlance" } },
+        { key = "GreatSword",     patterns = { "GreatSword" } },
+        { key = "LongSword",      patterns = { "LongSword" } },
+        { key = "Hammer",          patterns = { "Hammer" } },
+        { key = "Lance",           patterns = { "Lance" } },
+    }
+
+    for _, item in ipairs(patterns) do
         for _, pattern in ipairs(item.patterns) do
-            local pattern_normalized = normalize_weapon_type_name(pattern)
-            if pattern_normalized ~= ""
-                and string.find(normalized, pattern_normalized, 1, true) then
+            local p = normalize_weapon_type_name(pattern)
+            if p ~= "" and string.find(normalized, p, 1, true) then
                 return item.key
             end
         end
     end
 
+    return nil
+end
+
+local function get_weapon_type_chain(weapon)
+    local names = {}
+    if not weapon then return names end
+
+    local ok, td = pcall(function() return weapon:get_type_definition() end)
+    if not ok or not td then return names end
+
+    local cur = td
+    local guard = 0
+    while cur and guard < 16 do
+        local ok_name, name = pcall(function() return cur:get_name() end)
+        if ok_name and name then
+            names[#names + 1] = name
+        end
+
+        local ok_parent, parent = pcall(function() return cur:get_parent_type() end)
+        if not ok_parent then break end
+        cur = parent
+        guard = guard + 1
+    end
+
+    return names
+end
+
+-- _WeaponMain의 타입에 무기명이 직접 없을 경우를 대비해,
+-- 관련 하위 managed-object 타입도 최대 2단계까지만 확인합니다.
+-- 동일한 weapon 객체는 캐시해서 매 프레임 재귀 탐색하지 않습니다.
+local weapon_detect_cache_id = nil
+local weapon_detect_cache_key = "Generic"
+
+local function detect_nested_weapon_type(weapon, depth_limit)
+    if not weapon then return nil end
+    depth_limit = depth_limit or 2
+
+    local ok_id, object_id = pcall(function() return tostring(weapon) end)
+    object_id = ok_id and object_id or "(weapon)"
+
+    if weapon_detect_cache_id == object_id then
+        if weapon_detect_cache_key ~= "Generic" then
+            return weapon_detect_cache_key, bfm_weapon_type_name, bfm_weapon_source
+        end
+        return nil
+    end
+
+    weapon_detect_cache_id = object_id
+    weapon_detect_cache_key = "Generic"
+
+    local visited = {}
+    local function walk(obj, depth, field_path)
+        if not obj or depth > depth_limit then return nil end
+
+        local ok_obj, obj_id = pcall(function() return tostring(obj) end)
+        obj_id = ok_obj and obj_id or tostring(obj)
+        if visited[obj_id] then return nil end
+        visited[obj_id] = true
+
+        local names = get_weapon_type_chain(obj)
+        for _, name in ipairs(names) do
+            local key = weapon_key_from_type_name(name)
+            if key then
+                return key,
+                    name,
+                    field_path == "" and "nested-type" or ("nested:" .. field_path)
+            end
+        end
+
+        if depth >= depth_limit then return nil end
+
+        local ok_td, td = pcall(function() return obj:get_type_definition() end)
+        if not ok_td or not td then return nil end
+
+        local ok_fields, fields = pcall(function() return td:get_fields() end)
+        if not ok_fields or not fields then return nil end
+
+        for _, field in ipairs(fields) do
+            local ok_static, is_static = pcall(function() return field:is_static() end)
+            if not ok_static or not is_static then
+                local ok_fname, fname = pcall(function() return field:get_name() end)
+                fname = ok_fname and fname or "?"
+                local lower = tostring(fname):lower()
+
+                local relevant =
+                    lower:find("weapon", 1, true) ~= nil or
+                    lower:find("equip", 1, true) ~= nil or
+                    lower:find("base", 1, true) ~= nil or
+                    lower:find("data", 1, true) ~= nil or
+                    lower:find("main", 1, true) ~= nil
+
+                if relevant then
+                    local ok_value, value = pcall(function() return field:get_data(obj) end)
+                    if ok_value and value ~= nil then
+                        local vt = type(value)
+                        if vt == "userdata" or vt == "table" then
+                            local next_path = field_path == ""
+                                and fname
+                                or (field_path .. "." .. fname)
+                            local key, name, source = walk(value, depth + 1, next_path)
+                            if key then
+                                return key, name, source
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        return nil
+    end
+
+    local key, name, source = walk(weapon, 0, "")
+    if key then
+        weapon_detect_cache_key = key
+        bfm_weapon_type_name = name or bfm_weapon_type_name
+        bfm_weapon_source = source or bfm_weapon_source
+        return key, name, source
+    end
+
+    return nil
+end
+
+local function detect_weapon_key(player)
+    local weapon = get_main_weapon(player)
+    if not weapon then
+        bfm_weapon_type_name = "(unknown)"
+        bfm_weapon_source = "none"
+        weapon_type_name = "(unknown)"
+        weapon_detect_cache_id = nil
+        weapon_detect_cache_key = "Generic"
+        return "Generic"
+    end
+
+    -- 1) 직접 타입 + 부모 타입 체인
+    local names = get_weapon_type_chain(weapon)
+    for i, name in ipairs(names) do
+        local key = weapon_key_from_type_name(name)
+        if key then
+            weapon_type_name = names[1] or name
+            bfm_weapon_type_name = name
+            bfm_weapon_source = (i == 1) and "direct-type" or "parent-type"
+            weapon_detect_cache_id = nil
+            weapon_detect_cache_key = key
+            return key
+        end
+    end
+
+    -- 2) BFM-style 하위 managed object 타입 탐색
+    local nested_key = detect_nested_weapon_type(weapon, 2)
+    if nested_key then
+        return nested_key
+    end
+
+    weapon_type_name = names[1] or "(unknown)"
+    bfm_weapon_type_name = weapon_type_name
+    bfm_weapon_source = "unmatched"
     return "Generic"
 end
 
 local function update_weapon_profile(player)
-
     local key = detect_weapon_key(player)
     current_weapon_key = key
 
@@ -472,6 +661,181 @@ local function update_weapon_profile(player)
     return current_window_seconds
 end
 
+--==========================================================================
+-- 6.5. v2.5 BFM 상태 API 복구
+--
+-- v2.5에 있던 facing/target/startRotation 계열 접근을 복구합니다.
+-- 무기 판별과 BFM 상태 적용은 서로 분리되어 있습니다.
+-- BFM API가 실제로 존재하지 않으면 Transform 강제 회전이 그대로 fallback 합니다.
+--==========================================================================
+
+local bfm_api = {
+    initialized = false,
+    type_name = "(unknown)",
+    methods = {},
+    fields = {},
+    setter = nil,
+    getter = nil,
+    detected = false,
+    last_error = nil,
+}
+
+local BFM_GETTERS = {
+    "TryGetFacingDirection",
+    "get_FacingDirection",
+    "get_TargetDirection",
+    "get_StartRotation",
+}
+
+local BFM_SETTERS = {
+    "set_FacingDirection",
+    "set_TargetDirection",
+    "set_StartRotation",
+}
+
+local BFM_ZERO_METHODS = {
+    "BeginCorrection",
+    "ShouldRefreshCorrection",
+}
+
+local function method_num_params_safe(m)
+    local ok, n = pcall(function() return m:get_num_params() end)
+    if ok and type(n) == "number" then return n end
+    return nil
+end
+
+local function find_method_in_chain(td, name)
+    local cur = td
+    local guard = 0
+    while cur and guard < 16 do
+        local ok, m = pcall(function() return cur:get_method(name) end)
+        if ok and m then return m end
+        local ok_parent, parent = pcall(function() return cur:get_parent_type() end)
+        if not ok_parent then break end
+        cur = parent
+        guard = guard + 1
+    end
+    return nil
+end
+
+local function find_field_in_chain(td, name)
+    local cur = td
+    local guard = 0
+    while cur and guard < 16 do
+        local ok, f = pcall(function() return cur:get_field(name) end)
+        if ok and f then return f end
+        local ok_parent, parent = pcall(function() return cur:get_parent_type() end)
+        if not ok_parent then break end
+        cur = parent
+        guard = guard + 1
+    end
+    return nil
+end
+
+local function init_bfm_api(player)
+    if not cfg.use_bfm_state_api then return end
+    if bfm_api.initialized then return end
+    if not player then return end
+
+    local ok_td, td = pcall(function() return player:get_type_definition() end)
+    if not ok_td or not td then return end
+
+    bfm_api.initialized = true
+    local ok_name, player_type_name = pcall(function() return td:get_name() end)
+    bfm_api.type_name = ok_name and player_type_name or "(unknown)"
+    bfm_api.methods = {}
+    bfm_api.fields = {}
+    bfm_api.setter = nil
+    bfm_api.getter = nil
+    bfm_api.detected = false
+    bfm_api.last_error = nil
+
+    for _, name in ipairs(BFM_GETTERS) do
+        local m = find_method_in_chain(td, name)
+        if m then
+            local n = method_num_params_safe(m)
+            bfm_api.methods[name] = { method = m, params = n }
+            if bfm_api.getter == nil and n == 0 then
+                bfm_api.getter = name
+            end
+        end
+    end
+
+    for _, name in ipairs(BFM_SETTERS) do
+        local m = find_method_in_chain(td, name)
+        if m then
+            local n = method_num_params_safe(m)
+            bfm_api.methods[name] = { method = m, params = n }
+            if bfm_api.setter == nil and n == 1 then
+                bfm_api.setter = name
+            end
+        end
+    end
+
+    for _, name in ipairs(BFM_ZERO_METHODS) do
+        local m = find_method_in_chain(td, name)
+        if m then
+            local n = method_num_params_safe(m)
+            bfm_api.methods[name] = { method = m, params = n }
+        end
+    end
+
+    for _, name in ipairs({
+        "facingDirection", "targetDirection", "startRotation",
+        "FacingDirection", "TargetDirection", "StartRotation",
+        "_FacingDirection", "_TargetDirection", "_StartRotation"
+    }) do
+        local f = find_field_in_chain(td, name)
+        if f then
+            local ok_static, is_static = pcall(function() return f:is_static() end)
+            if not ok_static or not is_static then
+                bfm_api.fields[name] = f
+            end
+        end
+    end
+
+    bfm_api.detected =
+        (bfm_api.getter ~= nil or bfm_api.setter ~= nil or next(bfm_api.fields) ~= nil)
+end
+
+local function try_set_bfm_direction(player, direction)
+    if not cfg.use_bfm_state_api then return false end
+    init_bfm_api(player)
+    if not bfm_api.detected then return false end
+
+    if bfm_api.setter then
+        local vec_ok, vec = pcall(function()
+            return Vector3f.new(direction.x, direction.y, direction.z)
+        end)
+        if vec_ok and vec then
+            local ok, err = pcall(function()
+                player:call(bfm_api.setter, vec)
+            end)
+            if ok then return true end
+            bfm_api.last_error = tostring(err)
+        end
+    end
+
+    for name, field in pairs(bfm_api.fields) do
+        local lower = name:lower()
+        if lower:find("facing", 1, true) or lower:find("target", 1, true) then
+            local vec_ok, vec = pcall(function()
+                return Vector3f.new(direction.x, direction.y, direction.z)
+            end)
+            if vec_ok and vec then
+                local ok, err = pcall(function()
+                    field:set_data(player, vec)
+                end)
+                if ok then return true end
+                bfm_api.last_error = tostring(err)
+            end
+        end
+    end
+
+    return false
+end
+
+--==========================================================================
 --==========================================================================
 -- 6. 수학 / 상태
 --==========================================================================
@@ -508,6 +872,11 @@ local activity_frames_left = 0
 local activity_initialized = false
 local activity_last_pos = nil
 local activity_last_yaw = nil
+
+-- 공격 고정 종료와 평상시 Activity 추적의 겹침 구간
+local attack_handoff_remaining = 0.0
+local bfm_state_applied = false
+local bfm_state_direction = nil
 
 -- 공격 시작 순간의 yaw를 고정
 local attack_lock_active = false
@@ -549,6 +918,14 @@ local function reset_activity()
     activity_initialized = false
     activity_last_pos = nil
     activity_last_yaw = nil
+    attack_handoff_remaining = 0.0
+end
+
+local function start_attack_handoff()
+    attack_handoff_remaining = math.max(
+        attack_handoff_remaining,
+        math.max(0.0, cfg.attack_handoff_seconds or 0.0)
+    )
 end
 
 local function reset_attack_lock()
@@ -557,6 +934,8 @@ local function reset_attack_lock()
     attack_lock_remaining = 0.0
     post_window_hold_remaining = 0.0
     attack_triggered = false
+    bfm_state_applied = false
+    bfm_state_direction = nil
 end
 
 local function copy_vec3(v)
@@ -568,6 +947,17 @@ local function copy_vec3(v)
 end
 
 local function update_activity()
+    -- 핸드오프는 Activity gate가 false가 되어도 추적 상태를 유지합니다.
+    local dt = get_delta_time()
+    if attack_handoff_remaining > 0.0 then
+        attack_handoff_remaining = attack_handoff_remaining - dt
+        if attack_handoff_remaining < 0.0 then
+            attack_handoff_remaining = 0.0
+        end
+    end
+
+    local handoff_active = attack_handoff_remaining > 0.0
+
     if not cfg.activity_gate then
         activity_active = true
         return true
@@ -590,8 +980,8 @@ local function update_activity()
             activity_last_pos = copy_vec3(pos)
             activity_last_yaw = yaw
             activity_initialized = true
-            activity_active = false
-            return false
+            activity_active = handoff_active
+            return activity_active
         end
 
         local dx = pos.x - activity_last_pos.x
@@ -614,17 +1004,17 @@ local function update_activity()
             activity_frames_left = activity_frames_left - 1
         end
 
-        activity_active = activity_frames_left > 0
+        activity_active = (activity_frames_left > 0) or handoff_active
         return activity_active
     end)
 
     if not ok then
         last_error = "activity: " .. tostring(result)
-        activity_active = false
-        return false
+        activity_active = handoff_active
+        return activity_active
     end
 
-    return result
+    return result or handoff_active
 end
 
 --==========================================================================
@@ -681,6 +1071,7 @@ re.on_frame(function()
     -- 따라서 공격 입력 순간에 별도의 수동 무기 선택이 필요 없습니다.
     local current_player = get_player()
     if current_player then
+        init_bfm_api(current_player)
         update_weapon_profile(current_player)
     end
 
@@ -710,6 +1101,13 @@ re.on_frame(function()
 
             update_weapon_profile(player)
 
+            bfm_state_direction = {
+                x = math.sin(attack_locked_yaw),
+                y = 0.0,
+                z = math.cos(attack_locked_yaw),
+            }
+            bfm_state_applied = try_set_bfm_direction(player, bfm_state_direction)
+
             attack_lock_remaining =
                 math.max(
                     0.01,
@@ -718,6 +1116,8 @@ re.on_frame(function()
                 )
 
             attack_lock_active = true
+            -- 공격 고정이 끝나는 지점과 평상시 추적을 일부러 겹치게 예약합니다.
+            start_attack_handoff()
             attack_triggered = true
 
             return true
@@ -737,11 +1137,16 @@ re.on_frame(function()
             attack_lock_remaining = 0.0
             attack_lock_active = false
 
+            -- 만료 순간부터 다시 0.100초를 확보하여 Activity false와 겹칩니다.
+            start_attack_handoff()
+
             if cfg.post_window_hold_seconds > 0.0 then
                 post_window_hold_remaining =
                     cfg.post_window_hold_seconds
             else
-                attack_locked_yaw = nil
+                if attack_handoff_remaining <= 0.0 then
+                    attack_locked_yaw = nil
+                end
             end
         end
     elseif post_window_hold_remaining > 0.0 then
@@ -750,19 +1155,53 @@ re.on_frame(function()
 
         if post_window_hold_remaining <= 0.0 then
             post_window_hold_remaining = 0.0
-            attack_locked_yaw = nil
+            if attack_handoff_remaining <= 0.0 then
+                attack_locked_yaw = nil
+            end
         end
     end
 
     -- 공격 중이 아니면 v1.8식 활동 감지로 평상시 추적 여부 결정
     if not attack_lock_active and post_window_hold_remaining <= 0.0 then
         update_activity()
+        if attack_handoff_remaining > 0.0 then
+            activity_active = true
+        end
+    end
+
+    if not attack_lock_active
+        and post_window_hold_remaining <= 0.0
+        and attack_handoff_remaining <= 0.0 then
+        attack_locked_yaw = nil
     end
 end)
 
 --==========================================================================
 -- 8. APPLY
 --==========================================================================
+
+-- 현재 카메라 기준의 목표 yaw를 계산합니다.
+local function get_camera_target_yaw()
+    local player = get_player()
+    local ptr = get_transform(player)
+    local ctr = get_camera_transform()
+
+    if not player or not ptr or not ctr then
+        return nil
+    end
+
+    local ppos = ptr:call("get_Position")
+    local cpos = ctr:call("get_Position")
+
+    local dx = ppos.x - cpos.x
+    local dz = ppos.z - cpos.z
+
+    if (dx * dx + dz * dz) < 0.0001 then
+        return nil
+    end
+
+    return math.atan(dx, dz) + cfg.yaw_offset
+end
 
 -- 일반 카메라 추적용: smooth를 유지합니다.
 local function apply_yaw(target_yaw)
@@ -826,12 +1265,50 @@ local function apply_attack_lock_now()
 
     if attack_lock_active or post_window_hold_remaining > 0.0 then
         local ok, err = pcall(function()
+            local player = get_player()
+            local bfm_ok = false
+
+            if bfm_state_direction and player then
+                bfm_ok = try_set_bfm_direction(player, bfm_state_direction)
+                if bfm_ok then
+                    bfm_state_applied = true
+                else
+                    bfm_state_applied = false
+                end
+            end
+
+            -- BFM 상태값이 없는 버전에서도 반드시 Transform으로 최종 방향을 확정합니다.
             force_locked_yaw(attack_locked_yaw)
+
+            if bfm_ok then
+                apply_count = apply_count + 1
+            end
         end)
 
         if not ok then
             last_error = "attack force apply: " .. tostring(err)
         end
+    end
+end
+
+local function apply_attack_handoff_now()
+    if not focus_active then return end
+    if not cfg.apply_rotation then return end
+    if attack_lock_active then return end
+    if post_window_hold_remaining > 0.0 then return end
+    if attack_handoff_remaining <= 0.0 then return end
+
+    -- 핸드오프에서는 저장된 공격 yaw가 아니라 현재 카메라 방향을 바로 따라갑니다.
+    -- 이 구간이 기존 Activity false 1프레임을 완전히 덮어줍니다.
+    local target_yaw = get_camera_target_yaw()
+    if target_yaw == nil then return end
+
+    local ok, err = pcall(function()
+        force_locked_yaw(target_yaw)
+    end)
+
+    if not ok then
+        last_error = "attack handoff apply: " .. tostring(err)
     end
 end
 
@@ -851,6 +1328,11 @@ re.on_pre_application_entry("LockScene", function()
         return
     end
 
+    if attack_handoff_remaining > 0.0 then
+        apply_attack_handoff_now()
+        return
+    end
+
     -- 공격이 없을 때는 v1.8 스타일 활동 중에만 카메라 추적
     if cfg.activity_gate and not activity_active then
         return
@@ -865,18 +1347,10 @@ re.on_pre_application_entry("LockScene", function()
             return
         end
 
-        local ppos = ptr:call("get_Position")
-        local cpos = ctr:call("get_Position")
-
-        local dx = ppos.x - cpos.x
-        local dz = ppos.z - cpos.z
-
-        if (dx * dx + dz * dz) < 0.0001 then
+        local target_yaw = get_camera_target_yaw()
+        if target_yaw == nil then
             return
         end
-
-        local target_yaw =
-            math.atan(dx, dz) + cfg.yaw_offset
 
         if last_apply_frame == frame_id then
             return
@@ -894,16 +1368,19 @@ end)
 -- LockScene 직후: 게임 쪽에서 원래 방향을 다시 썼다면 즉시 되돌립니다.
 re.on_application_entry("LockScene", function()
     apply_attack_lock_now()
+    apply_attack_handoff_now()
 end)
 
 -- 실제 렌더 직전/직후에도 공격 고정 방향을 한 번 더 확정합니다.
 -- 이 구간은 화면에 보이기 직전의 마지막 방어선 역할을 합니다.
 re.on_pre_application_entry("PrepareRendering", function()
     apply_attack_lock_now()
+    apply_attack_handoff_now()
 end)
 
 re.on_application_entry("PrepareRendering", function()
     apply_attack_lock_now()
+    apply_attack_handoff_now()
 end)
 
 --==========================================================================
@@ -1034,6 +1511,18 @@ re.on_draw_ui(function()
         string.format("%.3f초", math.max(0.0, cfg.attack_lock_extension_seconds or 0.0))
     )
 
+    changed, val = imgui.slider_float(
+        "공격 종료 핸드오프(초)",
+        cfg.attack_handoff_seconds,
+        0.000,
+        0.250,
+        "%.3f"
+    )
+    if changed then
+        cfg.attack_handoff_seconds = val
+        save_cfg()
+    end
+
     imgui.text("※ 무기 Timing은 자동 적용됩니다. 수동 무기/무기별 Timing 변경은 없습니다.")
 
     if current_weapon_key == "Generic" then
@@ -1055,6 +1544,19 @@ re.on_draw_ui(function()
     end
 
     imgui.separator()
+
+    changed, val = imgui.checkbox(
+        "BFM 상태값 복구 사용",
+        cfg.use_bfm_state_api
+    )
+    if changed then
+        cfg.use_bfm_state_api = val
+        if not val then
+            bfm_state_applied = false
+            bfm_state_direction = nil
+        end
+        save_cfg()
+    end
 
     changed, val = imgui.checkbox(
         "디버그 표시",
@@ -1110,6 +1612,36 @@ re.on_draw_ui(function()
         )
 
         imgui.text(
+            "BFM weapon type: " ..
+            tostring(bfm_weapon_type_name)
+        )
+
+        imgui.text(
+            "BFM weapon source: " ..
+            tostring(bfm_weapon_source)
+        )
+
+        imgui.text(
+            "BFM player type: " ..
+            tostring(bfm_api.type_name)
+        )
+
+        imgui.text(
+            "BFM API detected: " ..
+            tostring(bfm_api.detected)
+        )
+
+        imgui.text(
+            "BFM setter: " ..
+            tostring(bfm_api.setter)
+        )
+
+        imgui.text(
+            "BFM state applied: " ..
+            tostring(bfm_state_applied)
+        )
+
+        imgui.text(
             "weapon window: " ..
             string.format("%.3f초", current_window_seconds)
         )
@@ -1117,6 +1649,11 @@ re.on_draw_ui(function()
         imgui.text(
             "lock extension: " ..
             string.format("%.3f초", math.max(0.0, cfg.attack_lock_extension_seconds or 0.0))
+        )
+
+        imgui.text(
+            "attack handoff remaining: " ..
+            string.format("%.3f초", attack_handoff_remaining)
         )
 
         imgui.text(
@@ -1148,10 +1685,12 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v2.8] loaded. " ..
+    "[MHR_FocusMode v2.9] loaded with BFM weapon-type restore. " ..
     "auto_weapon_detection=true" ..
     ", key=" ..
     tostring(key_display_name()) ..
     ", lock_extension=" ..
-    tostring(cfg.attack_lock_extension_seconds or 0.0)
+    tostring(cfg.attack_lock_extension_seconds or 0.0) ..
+    ", handoff=" ..
+    tostring(cfg.attack_handoff_seconds or 0.0)
 )
