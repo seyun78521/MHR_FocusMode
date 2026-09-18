@@ -1,19 +1,14 @@
 --[[
-    MHR_FocusMode v3.2 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v3.3 - Focus Aim for Monster Hunter Rise (REFramework)
 
-    v3.2 변경점 (v3.1 대비):
-      - "홀드 형식" 공격에서 방향 고정이 중간에 풀리던 문제를 수정했습니다.
-        v3.1까지는 좌/우클릭을 누른 "순간"에만 반응해서, 그 순간부터
-        무기별 지정 시간이 지나면 - 버튼을 계속 누르고 있어도(홀드) -
-        타이머가 그대로 소진되어 공격 도중에 카메라 추적이 다시 끼어들었습니다.
-      - v3.2부터는 좌클릭/우클릭을 누르고 있는 동안에는 attack_lock 타이머가
-        무기별 지정 시간(+ 내부 고정 여유) 밑으로 줄어들지 않도록 붙잡아 둡니다.
-        즉, 버튼을 떼기 전까지는 방향 고정이 계속 유지되고,
-        버튼을 뗀 시점부터 비로소 무기별 지정 시간만큼 카운트다운 후
+    v3.3 변경점 (v3.2 대비):
+      - 좌/우클릭 홀드 공격은 일정 시간 이상 누른 상태로 판정되면,
+        버튼을 뗀 즉시 방향 고정을 해제합니다. 버튼을 뗀 뒤에
+        무기별 지정 고정시간을 추가로 기다리지 않습니다.
+      - 짧게 클릭(탭)하는 경우에는 기존처럼 무기별 지정 시간만큼 고정 후
         handoff -> 평상시 추적으로 넘어갑니다.
-      - 짧게 클릭(탭)하는 경우의 동작은 v3.1과 동일합니다
-        (클릭 순간 카메라 방향 저장 -> 무기별 시간만큼 고정 -> handoff).
-      - 그 외 로직(무기 자동 판별, Activity Gate, handoff 등)은 v3.1과 동일합니다.
+      - 화면 하단 중앙에 "FocusMode" 사각형 HUD를 추가했습니다.
+        집중모드가 켜져 있을 때만 표시됩니다.
 
     v3.1 변경점 (v3.0 대비):
       - v1.8의 Activity Gate(정지 판정)를 되살렸습니다.
@@ -90,6 +85,11 @@ local DEFAULTS = {
 
     -- 공격 고정 -> 평상시 추적 사이를 일부러 겹치게 만들어 1프레임 공백 방지.
     attack_handoff_seconds = 0.100,
+
+    -- 이 시간 이상 좌/우클릭을 누르고 있으면 "홀드 공격"으로 판정합니다.
+    -- 홀드 공격은 버튼을 놓는 즉시 방향 고정을 해제하며,
+    -- 이 값 자체는 무기별 Timing과 무관한 공통 판정 기준입니다.
+    attack_hold_threshold_seconds = 0.080,
 
     -- v1.8에서 가져온 Activity Gate.
     -- "평상시 추적"에만 적용됩니다 (공격 고정/handoff에는 영향 없음).
@@ -534,6 +534,10 @@ local attack_locked_yaw = nil
 local attack_lock_remaining = 0.0
 local attack_triggered = false
 
+-- 홀드/탭 구분용. threshold를 넘으면 홀드 공격으로 판정.
+local attack_hold_elapsed = 0.0
+local attack_is_hold = false
+
 local attack_handoff_remaining = 0.0
 
 local last_error = nil
@@ -566,6 +570,8 @@ local function reset_attack_lock()
     attack_lock_active = false
     attack_locked_yaw = nil
     attack_lock_remaining = 0.0
+    attack_hold_elapsed = 0.0
+    attack_is_hold = false
     attack_handoff_remaining = 0.0
     attack_triggered = false
 end
@@ -760,9 +766,11 @@ re.on_frame(function()
             update_weapon_profile(player_at_attack)
 
             attack_lock_remaining = current_lock_floor()
+            attack_hold_elapsed = 0.0
+            attack_is_hold = false
 
             attack_lock_active = true
-            start_attack_handoff()
+            attack_handoff_remaining = 0.0
             attack_triggered = true
 
             return true
@@ -774,22 +782,42 @@ re.on_frame(function()
     end
 
     if attack_lock_active then
+        local dt = get_delta_time()
+
         if attack_held then
-            -- 좌클릭/우클릭을 계속 누르고 있는 동안(홀드 공격)에는
-            -- 무기별 지정 시간 밑으로 타이머가 줄어들지 않게 붙잡아 둡니다.
-            -- 버튼을 떼는 순간부터 비로소 정상적으로 카운트다운을 시작합니다.
+            -- 홀드 여부는 무기 Timing이 아니라 실제 누르고 있는 시간으로 판정합니다.
+            attack_hold_elapsed = attack_hold_elapsed + dt
+            if attack_hold_elapsed >=
+                math.max(0.0, cfg.attack_hold_threshold_seconds or 0.080) then
+                attack_is_hold = true
+            end
+
+            -- 누르고 있는 동안에는 공격 방향 고정을 계속 유지합니다.
+            -- 탭용 남은 Timing은 소비하지 않습니다.
             local floor = current_lock_floor()
             if attack_lock_remaining < floor then
                 attack_lock_remaining = floor
             end
         else
-            attack_lock_remaining =
-                attack_lock_remaining - get_delta_time()
-
-            if attack_lock_remaining <= 0.0 then
+            if attack_is_hold then
+                -- 홀드 공격은 버튼을 뗀 즉시 고정 해제.
+                -- 무기별 지정 Timing을 release 이후에 다시 기다리지 않습니다.
                 attack_lock_remaining = 0.0
                 attack_lock_active = false
-                start_attack_handoff()
+                attack_handoff_remaining = 0.0
+                attack_hold_elapsed = 0.0
+                attack_is_hold = false
+            else
+                -- 짧은 탭은 기존 동작 유지:
+                -- release 후 남은 무기별 고정시간을 소진하고 handoff.
+                attack_lock_remaining =
+                    attack_lock_remaining - dt
+
+                if attack_lock_remaining <= 0.0 then
+                    attack_lock_remaining = 0.0
+                    attack_lock_active = false
+                    start_attack_handoff()
+                end
             end
         end
     end
@@ -991,7 +1019,60 @@ re.on_application_entry("PrepareRendering", function()
     end
 end)
 
--- 9. UI
+-- 9. HUD
+--==========================================================================
+-- 집중모드가 켜져 있을 때만 게임 화면 하단 중앙에 표시되는 HUD입니다.
+-- REFramework ImGui의 begin_window/set_next_window_pos/get_display_size를 사용합니다.
+local FOCUS_HUD_WINDOW_FLAGS =
+      1       -- NoTitleBar
+    + 2       -- NoResize
+    + 4       -- NoMove
+    + 8       -- NoScrollbar
+    + 32      -- NoCollapse
+    + 64      -- AlwaysAutoResize
+    + 128     -- NoBackground
+    + 256     -- NoSavedSettings
+    + 512     -- NoMouseInputs
+    + 4096    -- NoFocusOnAppearing
+    + 8192    -- NoBringToFrontOnFocus
+    + 262144  -- NoNavInputs
+    + 524288  -- NoNavFocus
+
+local function draw_focus_hud()
+    if not focus_active then
+        return
+    end
+
+    local display = imgui.get_display_size()
+    local hud_pos = Vector2f.new(
+        display.x * 0.5,
+        display.y - 34.0
+    )
+
+    imgui.set_next_window_pos(
+        hud_pos,
+        1,
+        Vector2f.new(0.5, 1.0)
+    )
+
+    if imgui.begin_window(
+        "##MHR_FocusMode_HUD",
+        nil,
+        FOCUS_HUD_WINDOW_FLAGS
+    ) then
+        imgui.begin_rect()
+        imgui.text("FocusMode")
+        imgui.end_rect(12, 4)
+    end
+
+    imgui.end_window()
+end
+
+re.on_frame(function()
+    draw_focus_hud()
+end)
+
+-- 10. UI
 --==========================================================================
 
 re.on_draw_ui(function()
@@ -1192,6 +1273,18 @@ re.on_draw_ui(function()
         )
         imgui.text("attack lock: " .. tostring(attack_lock_active))
         imgui.text("attack_held(홀드 중): " .. tostring(attack_held))
+        imgui.text("attack_is_hold: " .. tostring(attack_is_hold))
+        imgui.text(
+            "attack hold elapsed: " ..
+            string.format("%.3f초", attack_hold_elapsed)
+        )
+        imgui.text(
+            "hold threshold: " ..
+            string.format(
+                "%.3f초",
+                math.max(0.0, cfg.attack_hold_threshold_seconds or 0.080)
+            )
+        )
         imgui.text(
             "attack remaining: " ..
             string.format("%.3f초", attack_lock_remaining)
@@ -1235,8 +1328,8 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.2] loaded. " ..
-    "BFM-type-only weapon detection, hold-attack lock fix" ..
+    "[MHR_FocusMode v3.3] loaded. " ..
+    "BFM-type-only weapon detection, instant hold-release + FocusMode HUD" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
     ", key=" ..
