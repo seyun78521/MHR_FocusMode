@@ -1022,30 +1022,43 @@ end)
 
 -- 9. HUD
 --==========================================================================
--- 집중모드가 켜져 있을 때만 화면 중앙에 작은 조준경을 표시합니다.
--- 참고 이미지처럼 좌우가 살짝 끊긴 원형 링 + 중앙 점을 사용합니다.
--- 위치는 참고 스크린샷과 비슷하게 화면 높이의 약 43% 지점입니다.
-local FOCUS_RETICLE_Y_RATIO = 0.43
-local FOCUS_RETICLE_BASE_RADIUS = 14.0
+-- 집중모드가 켜져 있을 때만 화면 중앙보다 살짝 아래에 작은 조준경을 표시합니다.
+-- 참고 이미지 기준 약 80% 크기로 줄이고, 링은 얇은 윤곽선 2줄이 아니라
+-- 실제로 흰색이 채워진 "띠"처럼 보이도록 여러 겹의 원호를 겹쳐 그립니다.
+local FOCUS_RETICLE_Y_RATIO = 0.45
+local FOCUS_RETICLE_BASE_RADIUS = 11.2
 local FOCUS_RETICLE_GAP_DEG = 11.0
-local FOCUS_RETICLE_SEGMENTS = 16
+local FOCUS_RETICLE_SEGMENTS = 20
+local FOCUS_RETICLE_THICKNESS = 2.6
 
-local function draw_reticle_arc(cx, cy, radius, start_deg, end_deg, color)
+local function draw_reticle_arc_band(cx, cy, outer_radius, thickness, start_deg, end_deg, color, scale)
     local start_rad = math.rad(start_deg)
     local end_rad = math.rad(end_deg)
-    local segments = math.max(4, FOCUS_RETICLE_SEGMENTS)
+    local segments = math.max(6, FOCUS_RETICLE_SEGMENTS)
     local step = (end_rad - start_rad) / segments
 
-    local prev_x = cx + math.cos(start_rad) * radius
-    local prev_y = cy + math.sin(start_rad) * radius
+    -- 선 하나만 그리지 않고 반지름 방향으로 여러 줄을 촘촘하게 겹쳐
+    -- 링 내부까지 흰색으로 채워진 것처럼 보이게 합니다.
+    local layers = math.max(2, math.floor(thickness * 1.8 * scale + 0.5))
+    local inner_radius = math.max(0.5, outer_radius - thickness)
 
-    for i = 1, segments do
-        local angle = start_rad + step * i
-        local x = cx + math.cos(angle) * radius
-        local y = cy + math.sin(angle) * radius
-        draw.line(prev_x, prev_y, x, y, color)
-        prev_x = x
-        prev_y = y
+    for layer = 0, layers do
+        local t = layer / layers
+        local radius = outer_radius - (outer_radius - inner_radius) * t
+
+        local prev_x = cx + math.cos(start_rad) * radius
+        local prev_y = cy + math.sin(start_rad) * radius
+
+        for i = 1, segments do
+            local angle = start_rad + step * i
+            local x = cx + math.cos(angle) * radius
+            local y = cy + math.sin(angle) * radius
+
+            draw.line(prev_x, prev_y, x, y, color)
+
+            prev_x = x
+            prev_y = y
+        end
     end
 end
 
@@ -1066,23 +1079,32 @@ local function draw_focus_hud()
     local cx = display.x * 0.5
     local cy = display.y * FOCUS_RETICLE_Y_RATIO
     local radius = FOCUS_RETICLE_BASE_RADIUS * scale
-    local inner_radius = radius - math.max(1.0, 1.2 * scale)
+    local thickness = math.max(1.8, FOCUS_RETICLE_THICKNESS * scale)
     local gap = FOCUS_RETICLE_GAP_DEG
 
-    -- ARGB/ABGR 어느 쪽으로 전달되어도 흰색은 동일하게 보입니다.
+    -- 흰색
     local color = 0xFFFFFFFF
 
-    -- 위쪽 반원 + 아래쪽 반원. 좌우에 작은 간격이 남아
-    -- 참고 이미지의 조준경 느낌을 냅니다.
-    draw_reticle_arc(cx, cy, radius, gap, 180.0 - gap, color)
-    draw_reticle_arc(cx, cy, radius, 180.0 + gap, 360.0 - gap, color)
+    -- 좌우가 살짝 끊긴 원형 조준경.
+    draw_reticle_arc_band(
+        cx, cy, radius, thickness,
+        gap, 180.0 - gap,
+        color, scale
+    )
+    draw_reticle_arc_band(
+        cx, cy, radius, thickness,
+        180.0 + gap, 360.0 - gap,
+        color, scale
+    )
 
-    -- 조금 안쪽에도 한 줄을 더 그려 저해상도에서도 링이 뭉개지지 않게 합니다.
-    draw_reticle_arc(cx, cy, inner_radius, gap, 180.0 - gap, color)
-    draw_reticle_arc(cx, cy, inner_radius, 180.0 + gap, 360.0 - gap, color)
-
-    -- 중앙의 작은 조준점
-    draw.filled_circle(cx, cy, math.max(2.5, 3.0 * scale), color, 16)
+    -- 중앙 조준점도 기존보다 약간 작고 또렷하게.
+    draw.filled_circle(
+        cx,
+        cy,
+        math.max(2.0, 2.4 * scale),
+        color,
+        16
+    )
 end
 
 -- draw.* API는 on_draw_ui에서 화면 좌표로 바로 그릴 수 있습니다.
@@ -1346,8 +1368,8 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.4] loaded. " ..
-    "BFM-type-only weapon detection, instant hold-release + center reticle HUD" ..
+    "[MHR_FocusMode v3.5] loaded. " ..
+    "BFM-type-only weapon detection, instant hold-release + smaller filled-band reticle HUD" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
     ", key=" ..
