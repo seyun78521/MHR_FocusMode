@@ -1,5 +1,19 @@
 --[[
-    MHR_FocusMode v3.1 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v3.2 - Focus Aim for Monster Hunter Rise (REFramework)
+
+    v3.2 변경점 (v3.1 대비):
+      - "홀드 형식" 공격에서 방향 고정이 중간에 풀리던 문제를 수정했습니다.
+        v3.1까지는 좌/우클릭을 누른 "순간"에만 반응해서, 그 순간부터
+        무기별 지정 시간이 지나면 - 버튼을 계속 누르고 있어도(홀드) -
+        타이머가 그대로 소진되어 공격 도중에 카메라 추적이 다시 끼어들었습니다.
+      - v3.2부터는 좌클릭/우클릭을 누르고 있는 동안에는 attack_lock 타이머가
+        무기별 지정 시간(+ 내부 고정 여유) 밑으로 줄어들지 않도록 붙잡아 둡니다.
+        즉, 버튼을 떼기 전까지는 방향 고정이 계속 유지되고,
+        버튼을 뗀 시점부터 비로소 무기별 지정 시간만큼 카운트다운 후
+        handoff -> 평상시 추적으로 넘어갑니다.
+      - 짧게 클릭(탭)하는 경우의 동작은 v3.1과 동일합니다
+        (클릭 순간 카메라 방향 저장 -> 무기별 시간만큼 고정 -> handoff).
+      - 그 외 로직(무기 자동 판별, Activity Gate, handoff 등)은 v3.1과 동일합니다.
 
     v3.1 변경점 (v3.0 대비):
       - v1.8의 Activity Gate(정지 판정)를 되살렸습니다.
@@ -272,6 +286,7 @@ end
 local mouse_singleton, mouse_tdef, mouse_button_tdef
 local mouse_prev_l = false
 local mouse_prev_r = false
+local attack_held = false  -- 좌클릭 또는 우클릭을 "누르고 있는(홀드)" 상태
 local mouse_error = nil
 
 local function get_mouse()
@@ -337,6 +352,7 @@ local function update_attack_input()
 
     mouse_prev_l = l
     mouse_prev_r = r
+    attack_held  = l or r
 
     return trg_l or trg_r
 end
@@ -561,6 +577,17 @@ local function start_attack_handoff()
     )
 end
 
+-- 무기별 지정 시간 + 내부 고정 여유를 더한 "최소 유지 시간".
+-- 좌/우클릭을 누르고 있는 동안에는 attack_lock_remaining이
+-- 이 값 밑으로 떨어지지 않도록 붙잡아 두는 데 사용합니다.
+local function current_lock_floor()
+    return math.max(
+        0.01,
+        current_window_seconds +
+        math.max(0.0, cfg.attack_lock_extension_seconds or 0.0)
+    )
+end
+
 --==========================================================================
 -- 6b. Activity Gate (v1.8 재사용) - "평상시 추적"에만 적용
 --==========================================================================
@@ -684,6 +711,7 @@ re.on_frame(function()
     end
 
     local attack_trg = false
+    attack_held = false
     if get_mouse() ~= nil then
         attack_trg = update_attack_input()
     end
@@ -731,12 +759,7 @@ re.on_frame(function()
             -- 공격 직전의 BFM Type으로 Timing을 확정합니다.
             update_weapon_profile(player_at_attack)
 
-            attack_lock_remaining =
-                math.max(
-                    0.01,
-                    current_window_seconds +
-                    math.max(0.0, cfg.attack_lock_extension_seconds or 0.0)
-                )
+            attack_lock_remaining = current_lock_floor()
 
             attack_lock_active = true
             start_attack_handoff()
@@ -751,13 +774,23 @@ re.on_frame(function()
     end
 
     if attack_lock_active then
-        attack_lock_remaining =
-            attack_lock_remaining - get_delta_time()
+        if attack_held then
+            -- 좌클릭/우클릭을 계속 누르고 있는 동안(홀드 공격)에는
+            -- 무기별 지정 시간 밑으로 타이머가 줄어들지 않게 붙잡아 둡니다.
+            -- 버튼을 떼는 순간부터 비로소 정상적으로 카운트다운을 시작합니다.
+            local floor = current_lock_floor()
+            if attack_lock_remaining < floor then
+                attack_lock_remaining = floor
+            end
+        else
+            attack_lock_remaining =
+                attack_lock_remaining - get_delta_time()
 
-        if attack_lock_remaining <= 0.0 then
-            attack_lock_remaining = 0.0
-            attack_lock_active = false
-            start_attack_handoff()
+            if attack_lock_remaining <= 0.0 then
+                attack_lock_remaining = 0.0
+                attack_lock_active = false
+                start_attack_handoff()
+            end
         end
     end
 
@@ -1158,6 +1191,7 @@ re.on_draw_ui(function()
             tostring(activity_frames_left)
         )
         imgui.text("attack lock: " .. tostring(attack_lock_active))
+        imgui.text("attack_held(홀드 중): " .. tostring(attack_held))
         imgui.text(
             "attack remaining: " ..
             string.format("%.3f초", attack_lock_remaining)
@@ -1201,8 +1235,8 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.1] loaded. " ..
-    "BFM-type-only weapon detection" ..
+    "[MHR_FocusMode v3.2] loaded. " ..
+    "BFM-type-only weapon detection, hold-attack lock fix" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
     ", key=" ..
