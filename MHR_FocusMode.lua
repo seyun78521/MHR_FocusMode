@@ -1,13 +1,15 @@
 --[[
-    ModFocusRise v2.7 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v2.8 - Focus Aim for Monster Hunter Rise (REFramework)
 
-    v2.7 구조:
-      - v1.8의 검증된 "행동 중 카메라 방향 추적" 방식을 기반으로 합니다.
-      - LALT 집중모드 중 이동/회전이 감지되면 카메라 방향을 계속 따라갑니다.
-      - 공격 입력(마우스 L/R)이 시작되면 그 순간의 방향을 잠그고,
-        현재 무기에 해당하는 Better Focus Timing 동안 그 방향을 유지합니다.
-      - 공격 고정 시간이 끝나면 다시 일반 카메라 추적으로 돌아갑니다.
-      - 무기별 Timing은 자동 적용하거나 개별 수정할 수 있습니다.
+    v2.8 구조:
+      - v2.7의 평상시 "행동 중 카메라 방향 추적"을 그대로 유지합니다.
+      - 공격 입력(마우스 L/R)이 시작되면 그 순간의 카메라 방향을 저장합니다.
+      - 공격 고정 중에는 보간(smooth)을 사용하지 않고 정확한 yaw를 강제합니다.
+      - LockScene 전/후 및 PrepareRendering 전/후에 재적용하여
+        게임 쪽 회전이 중간에 잠깐 덮어쓰는 현상을 줄입니다.
+      - 무기 Timing은 항상 자동 인식하며, 무기 미감지 시에만 Generic 값을 사용합니다.
+      - 공격 고정 시간에 소폭의 여유(+0.020초)를 추가합니다.
+      - 수동으로 특정 무기를 선택하거나 무기별 Timing을 바꾸는 기능은 제거했습니다.
 
     Better Focus Mode Timing:
       GreatSword=0.24
@@ -23,8 +25,8 @@
       InsectGlaive=0.18
 
     주의:
-      - 무기 감지는 _WeaponMain의 런타임 타입명을 기준으로 합니다.
-      - 타입명이 예상과 다르면 "수동 무기" 모드를 사용할 수 있습니다.
+      - 무기 감지는 현재 플레이어의 _WeaponMain 런타임 타입명을 기준으로 항상 자동 수행합니다.
+      - 타입명이 매칭되지 않을 때만 Generic(미감지/기본) Timing을 사용합니다.
 --]]
 
 --==========================================================================
@@ -43,7 +45,7 @@ local DEFAULTS = {
     yaw_offset     = 0.0,
 
     debug          = false,
-    apply_rotation = false,
+    apply_rotation = true,
 
     -- v1.8 스타일: 움직이거나 회전할 때만 평상시 카메라 추적
     activity_gate          = true,
@@ -51,25 +53,16 @@ local DEFAULTS = {
     activity_yaw_threshold = 0.015,
     activity_hold_frames   = 12,
 
-    -- 무기별 Timing
-    auto_weapon_timing = true,
-    manual_weapon      = "GreatSword",
+    -- 무기 Timing은 항상 자동 인식.
+    -- 무기가 인식되지 않을 때만 아래 Generic 값을 사용합니다.
     generic_window_seconds = 0.196,
-
-    great_sword_window_seconds      = 0.24,
-    long_sword_window_seconds       = 0.18,
-    charge_blade_window_seconds     = 0.22,
-    sword_and_shield_window_seconds = 0.16,
-    dual_blades_window_seconds      = 0.14,
-    hammer_window_seconds            = 0.24,
-    hunting_horn_window_seconds     = 0.22,
-    lance_window_seconds             = 0.18,
-    gunlance_window_seconds          = 0.20,
-    switch_axe_window_seconds        = 0.20,
-    insect_glaive_window_seconds     = 0.18,
 
     -- 공격 고정 시간 종료 후 바로 일반 추적으로 복귀
     post_window_hold_seconds = 0.00,
+
+    -- 공격 모션 중 원래 방향으로 되돌아가는 프레임을 줄이기 위한 소폭의 여유 시간.
+    -- UI에는 노출하지 않고 내부에서만 적용합니다.
+    attack_lock_extension_seconds = 0.020,
 }
 
 local cfg = json.load_file(CFG_PATH) or {}
@@ -141,22 +134,6 @@ local WEAPON_PATTERNS = {
     { key = "SwitchAxe",      patterns = { "SlashAxe", "SwitchAxe" } },
     { key = "InsectGlaive",   patterns = { "InsectGlaive", "Insect" } },
 }
-
-local function refresh_weapon_timings()
-    WEAPON_TIMINGS.GreatSword     = cfg.great_sword_window_seconds
-    WEAPON_TIMINGS.LongSword      = cfg.long_sword_window_seconds
-    WEAPON_TIMINGS.ChargeBlade    = cfg.charge_blade_window_seconds
-    WEAPON_TIMINGS.SwordAndShield = cfg.sword_and_shield_window_seconds
-    WEAPON_TIMINGS.DualBlades     = cfg.dual_blades_window_seconds
-    WEAPON_TIMINGS.Hammer         = cfg.hammer_window_seconds
-    WEAPON_TIMINGS.HuntingHorn    = cfg.hunting_horn_window_seconds
-    WEAPON_TIMINGS.Lance          = cfg.lance_window_seconds
-    WEAPON_TIMINGS.Gunlance       = cfg.gunlance_window_seconds
-    WEAPON_TIMINGS.SwitchAxe      = cfg.switch_axe_window_seconds
-    WEAPON_TIMINGS.InsectGlaive  = cfg.insect_glaive_window_seconds
-end
-
-refresh_weapon_timings()
 
 --==========================================================================
 -- 3. 키 입력
@@ -350,7 +327,26 @@ end
 local function get_player()
     local pm = sdk.get_managed_singleton("snow.player.PlayerManager")
     if not pm then return nil end
-    return pm:call("findMasterPlayer")
+
+    -- Rise 모딩에서 일반적으로 쓰이는 현재 플레이어 조회 경로를 우선 사용.
+    local ok, player = pcall(function()
+        return pm:call("getPlayer", 0)
+    end)
+
+    if ok and player then
+        return player
+    end
+
+    -- 기존 버전 호환 fallback.
+    local ok_fallback, master = pcall(function()
+        return pm:call("findMasterPlayer")
+    end)
+
+    if ok_fallback then
+        return master
+    end
+
+    return nil
 end
 
 local function get_transform(obj)
@@ -389,16 +385,24 @@ local weapon_detect_error = nil
 local function get_main_weapon(player)
     if not player then return nil end
 
-    local ok, weapon = pcall(function()
-        return player:get_field("_WeaponMain")
-    end)
+    -- _WeaponMain이 Rise의 일반적인 런타임 필드이며, 호환성을 위해
+    -- 동일 의미의 공개 필드명도 안전하게 시도합니다.
+    for _, field_name in ipairs({ "_WeaponMain", "WeaponMain" }) do
+        local ok, weapon = pcall(function()
+            return player:get_field(field_name)
+        end)
 
-    if not ok then
-        weapon_detect_error = tostring(weapon)
-        return nil
+        if ok and weapon ~= nil then
+            weapon_detect_error = nil
+            return weapon
+        end
+
+        if not ok then
+            weapon_detect_error = tostring(weapon)
+        end
     end
 
-    return weapon
+    return nil
 end
 
 local function get_weapon_type_name(weapon)
@@ -423,11 +427,15 @@ local function get_weapon_type_name(weapon)
     return name
 end
 
-local function detect_weapon_key(player)
-    if not cfg.auto_weapon_timing then
-        return cfg.manual_weapon or "GreatSword"
-    end
+local function normalize_weapon_type_name(name)
+    if not name then return "" end
+    local s = tostring(name):lower()
+    -- 런타임 타입명에 namespace / punctuation이 섞여도 매칭되도록 영숫자만 남깁니다.
+    s = s:gsub("[^%w]", "")
+    return s
+end
 
+local function detect_weapon_key(player)
     local weapon = get_main_weapon(player)
     local type_name = get_weapon_type_name(weapon)
 
@@ -435,9 +443,13 @@ local function detect_weapon_key(player)
         return "Generic"
     end
 
+    local normalized = normalize_weapon_type_name(type_name)
+
     for _, item in ipairs(WEAPON_PATTERNS) do
         for _, pattern in ipairs(item.patterns) do
-            if string.find(type_name, pattern, 1, true) then
+            local pattern_normalized = normalize_weapon_type_name(pattern)
+            if pattern_normalized ~= ""
+                and string.find(normalized, pattern_normalized, 1, true) then
                 return item.key
             end
         end
@@ -447,7 +459,6 @@ local function detect_weapon_key(player)
 end
 
 local function update_weapon_profile(player)
-    refresh_weapon_timings()
 
     local key = detect_weapon_key(player)
     current_weapon_key = key
@@ -666,6 +677,13 @@ re.on_frame(function()
         return
     end
 
+    -- 집중모드 중에는 현재 무기를 계속 자동 갱신합니다.
+    -- 따라서 공격 입력 순간에 별도의 수동 무기 선택이 필요 없습니다.
+    local current_player = get_player()
+    if current_player then
+        update_weapon_profile(current_player)
+    end
+
     -- 공격 시작: 이 순간의 카메라 방향을 고정
     if attack_trg then
         local player = get_player()
@@ -693,7 +711,11 @@ re.on_frame(function()
             update_weapon_profile(player)
 
             attack_lock_remaining =
-                math.max(0.01, current_window_seconds)
+                math.max(
+                    0.01,
+                    current_window_seconds +
+                    math.max(0.0, cfg.attack_lock_extension_seconds or 0.0)
+                )
 
             attack_lock_active = true
             attack_triggered = true
@@ -742,6 +764,7 @@ end)
 -- 8. APPLY
 --==========================================================================
 
+-- 일반 카메라 추적용: smooth를 유지합니다.
 local function apply_yaw(target_yaw)
     local player = get_player()
     if not player then return end
@@ -773,40 +796,58 @@ local function apply_yaw(target_yaw)
     apply_count = apply_count + 1
 end
 
+-- 공격 고정용: 보간하지 않고 목표 yaw를 정확히 맞춥니다.
+-- 현재 회전의 pitch/roll은 유지하고 yaw만 목표값으로 정렬합니다.
+local function force_locked_yaw(target_yaw)
+    local player = get_player()
+    if not player then return end
+
+    local ptr = get_transform(player)
+    if not ptr then return end
+
+    local current_rotation = ptr:call("get_Rotation")
+    local cur_yaw = yaw_from_quat(current_rotation)
+    local diff = wrap_pi(target_yaw - cur_yaw)
+
+    if math.abs(diff) > 0.0001 then
+        local yaw_delta_quat = quat_from_yaw(diff)
+        local new_rotation =
+            (yaw_delta_quat * current_rotation):normalized()
+
+        ptr:call("set_Rotation", new_rotation)
+        apply_count = apply_count + 1
+    end
+end
+
+local function apply_attack_lock_now()
+    if not focus_active then return end
+    if not cfg.apply_rotation then return end
+    if attack_locked_yaw == nil then return end
+
+    if attack_lock_active or post_window_hold_remaining > 0.0 then
+        local ok, err = pcall(function()
+            force_locked_yaw(attack_locked_yaw)
+        end)
+
+        if not ok then
+            last_error = "attack force apply: " .. tostring(err)
+        end
+    end
+end
+
+-- LockScene 직전: 게임 로직이 회전을 쓰기 전에 먼저 정렬
 re.on_pre_application_entry("LockScene", function()
     if not focus_active then return end
     if not cfg.apply_rotation then return end
 
-    -- 공격 고정 중에는 활동 감지와 무관하게 저장된 방향 유지
     if attack_lock_active and attack_locked_yaw ~= nil then
-        if last_apply_frame == frame_id then return end
-        last_apply_frame = frame_id
-
-        local ok, err = pcall(function()
-            apply_yaw(attack_locked_yaw)
-        end)
-
-        if not ok then
-            last_error = "attack apply: " .. tostring(err)
-        end
-
+        apply_attack_lock_now()
         return
     end
 
     if post_window_hold_remaining > 0.0
         and attack_locked_yaw ~= nil then
-
-        if last_apply_frame == frame_id then return end
-        last_apply_frame = frame_id
-
-        local ok, err = pcall(function()
-            apply_yaw(attack_locked_yaw)
-        end)
-
-        if not ok then
-            last_error = "post hold apply: " .. tostring(err)
-        end
-
+        apply_attack_lock_now()
         return
     end
 
@@ -848,6 +889,21 @@ re.on_pre_application_entry("LockScene", function()
     if not ok then
         last_error = "normal apply: " .. tostring(err)
     end
+end)
+
+-- LockScene 직후: 게임 쪽에서 원래 방향을 다시 썼다면 즉시 되돌립니다.
+re.on_application_entry("LockScene", function()
+    apply_attack_lock_now()
+end)
+
+-- 실제 렌더 직전/직후에도 공격 고정 방향을 한 번 더 확정합니다.
+-- 이 구간은 화면에 보이기 직전의 마지막 방어선 역할을 합니다.
+re.on_pre_application_entry("PrepareRendering", function()
+    apply_attack_lock_now()
+end)
+
+re.on_application_entry("PrepareRendering", function()
+    apply_attack_lock_now()
 end)
 
 --==========================================================================
@@ -960,70 +1016,42 @@ re.on_draw_ui(function()
     imgui.separator()
     imgui.text("공격 시작 방향 고정")
 
-    changed, val = imgui.checkbox(
-        "무기별 자동 타이밍",
-        cfg.auto_weapon_timing
+    update_weapon_profile(get_player())
+
+    imgui.text(
+        "현재 무기: " ..
+        (WEAPON_LABELS[current_weapon_key] or current_weapon_key)
     )
-    if changed then
-        cfg.auto_weapon_timing = val
-        save_cfg()
-    end
 
-    if cfg.auto_weapon_timing then
-        local seconds = update_weapon_profile()
+    imgui.text(
+        "런타임 타입: " .. tostring(weapon_type_name)
+    )
 
-        imgui.text(
-            "현재 무기: " ..
-            (WEAPON_LABELS[current_weapon_key] or current_weapon_key)
-        )
+    imgui.text(
+        "현재 적용 보정 시간: " ..
+        string.format("%.3f초", current_window_seconds) ..
+        " + 여유 " ..
+        string.format("%.3f초", math.max(0.0, cfg.attack_lock_extension_seconds or 0.0))
+    )
 
-        imgui.text(
-            "보정 시간: " ..
-            string.format("%.3f초", seconds)
-        )
-    else
-        local manual_index = 1
+    imgui.text("※ 무기 Timing은 자동 적용됩니다. 수동 무기/무기별 Timing 변경은 없습니다.")
 
-        for i, key in ipairs(WEAPON_ORDER) do
-            if key == cfg.manual_weapon then
-                manual_index = i
-                break
-            end
-        end
-
-        local labels = {}
-        for _, key in ipairs(WEAPON_ORDER) do
-            table.insert(labels, WEAPON_LABELS[key])
-        end
-
-        changed, val = imgui.combo(
-            "수동 무기",
-            manual_index,
-            labels
+    if current_weapon_key == "Generic" then
+        changed, val = imgui.slider_float(
+            "미감지/기본 보정 시간(초)",
+            cfg.generic_window_seconds,
+            0.05,
+            0.50,
+            "%.3f"
         )
 
         if changed then
-            cfg.manual_weapon = WEAPON_ORDER[val]
-            update_weapon_profile()
+            cfg.generic_window_seconds = val
+            update_weapon_profile(get_player())
             save_cfg()
         end
 
-        imgui.text(
-            "보정 시간: " ..
-            string.format("%.3f초", current_window_seconds)
-        )
-    end
-
-    changed, val = imgui.slider_float(
-        "미감지/기본 보정 시간(초)",
-        cfg.generic_window_seconds,
-        0.05,
-        0.50,
-        "%.3f"
-    )
-    if changed then
-        cfg.generic_window_seconds = val
-        save_cfg()
+        imgui.text("현재 무기명을 인식하지 못해 Generic 값이 사용됩니다.")
     end
 
     imgui.separator()
@@ -1047,7 +1075,7 @@ re.on_draw_ui(function()
     end
 
     if cfg.debug then
-        update_weapon_profile()
+        update_weapon_profile(get_player())
 
         imgui.text("focus_active: " .. tostring(focus_active))
         imgui.text("player: " .. tostring(get_player() ~= nil))
@@ -1087,6 +1115,11 @@ re.on_draw_ui(function()
         )
 
         imgui.text(
+            "lock extension: " ..
+            string.format("%.3f초", math.max(0.0, cfg.attack_lock_extension_seconds or 0.0))
+        )
+
+        imgui.text(
             "apply_count: " ..
             tostring(apply_count)
         )
@@ -1115,9 +1148,10 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[ModFocusRise v2.7] loaded. " ..
-    "auto_weapon_timing=" ..
-    tostring(cfg.auto_weapon_timing) ..
+    "[MHR_FocusMode v2.8] loaded. " ..
+    "auto_weapon_detection=true" ..
     ", key=" ..
-    tostring(key_display_name())
+    tostring(key_display_name()) ..
+    ", lock_extension=" ..
+    tostring(cfg.attack_lock_extension_seconds or 0.0)
 )
