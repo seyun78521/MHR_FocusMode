@@ -1,5 +1,5 @@
 --[[
-    MHR_FocusMode v3.3 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v3.4 - Focus Aim for Monster Hunter Rise (REFramework)
 
     v3.3 변경점 (v3.2 대비):
       - 좌/우클릭 홀드 공격은 일정 시간 이상 누른 상태로 판정되면,
@@ -7,8 +7,9 @@
         무기별 지정 고정시간을 추가로 기다리지 않습니다.
       - 짧게 클릭(탭)하는 경우에는 기존처럼 무기별 지정 시간만큼 고정 후
         handoff -> 평상시 추적으로 넘어갑니다.
-      - 화면 하단 중앙에 "FocusMode" 사각형 HUD를 추가했습니다.
-        집중모드가 켜져 있을 때만 표시됩니다.
+      - 집중모드 HUD를 글씨/사각형 대신 화면 중앙의 작은 조준경(reticle)으로 변경했습니다.
+        집중모드가 켜져 있을 때만 표시되며, 참고 이미지처럼 좌우에 간격이 있는 원형
+        링 + 중앙 점 형태로 그립니다.
 
     v3.1 변경점 (v3.0 대비):
       - v1.8의 Activity Gate(정지 판정)를 되살렸습니다.
@@ -1021,22 +1022,32 @@ end)
 
 -- 9. HUD
 --==========================================================================
--- 집중모드가 켜져 있을 때만 게임 화면 하단 중앙에 표시되는 HUD입니다.
--- REFramework ImGui의 begin_window/set_next_window_pos/get_display_size를 사용합니다.
-local FOCUS_HUD_WINDOW_FLAGS =
-      1       -- NoTitleBar
-    + 2       -- NoResize
-    + 4       -- NoMove
-    + 8       -- NoScrollbar
-    + 32      -- NoCollapse
-    + 64      -- AlwaysAutoResize
-    + 128     -- NoBackground
-    + 256     -- NoSavedSettings
-    + 512     -- NoMouseInputs
-    + 4096    -- NoFocusOnAppearing
-    + 8192    -- NoBringToFrontOnFocus
-    + 262144  -- NoNavInputs
-    + 524288  -- NoNavFocus
+-- 집중모드가 켜져 있을 때만 화면 중앙에 작은 조준경을 표시합니다.
+-- 참고 이미지처럼 좌우가 살짝 끊긴 원형 링 + 중앙 점을 사용합니다.
+-- 위치는 참고 스크린샷과 비슷하게 화면 높이의 약 43% 지점입니다.
+local FOCUS_RETICLE_Y_RATIO = 0.43
+local FOCUS_RETICLE_BASE_RADIUS = 14.0
+local FOCUS_RETICLE_GAP_DEG = 11.0
+local FOCUS_RETICLE_SEGMENTS = 16
+
+local function draw_reticle_arc(cx, cy, radius, start_deg, end_deg, color)
+    local start_rad = math.rad(start_deg)
+    local end_rad = math.rad(end_deg)
+    local segments = math.max(4, FOCUS_RETICLE_SEGMENTS)
+    local step = (end_rad - start_rad) / segments
+
+    local prev_x = cx + math.cos(start_rad) * radius
+    local prev_y = cy + math.sin(start_rad) * radius
+
+    for i = 1, segments do
+        local angle = start_rad + step * i
+        local x = cx + math.cos(angle) * radius
+        local y = cy + math.sin(angle) * radius
+        draw.line(prev_x, prev_y, x, y, color)
+        prev_x = x
+        prev_y = y
+    end
+end
 
 local function draw_focus_hud()
     if not focus_active then
@@ -1044,31 +1055,38 @@ local function draw_focus_hud()
     end
 
     local display = imgui.get_display_size()
-    local hud_pos = Vector2f.new(
-        display.x * 0.5,
-        display.y - 34.0
-    )
-
-    imgui.set_next_window_pos(
-        hud_pos,
-        1,
-        Vector2f.new(0.5, 1.0)
-    )
-
-    if imgui.begin_window(
-        "##MHR_FocusMode_HUD",
-        nil,
-        FOCUS_HUD_WINDOW_FLAGS
-    ) then
-        imgui.begin_rect()
-        imgui.text("FocusMode")
-        imgui.end_rect(12, 4)
+    if not display then
+        return
     end
 
-    imgui.end_window()
+    local scale = display.y / 450.0
+    if scale < 0.75 then scale = 0.75 end
+    if scale > 2.50 then scale = 2.50 end
+
+    local cx = display.x * 0.5
+    local cy = display.y * FOCUS_RETICLE_Y_RATIO
+    local radius = FOCUS_RETICLE_BASE_RADIUS * scale
+    local inner_radius = radius - math.max(1.0, 1.2 * scale)
+    local gap = FOCUS_RETICLE_GAP_DEG
+
+    -- ARGB/ABGR 어느 쪽으로 전달되어도 흰색은 동일하게 보입니다.
+    local color = 0xFFFFFFFF
+
+    -- 위쪽 반원 + 아래쪽 반원. 좌우에 작은 간격이 남아
+    -- 참고 이미지의 조준경 느낌을 냅니다.
+    draw_reticle_arc(cx, cy, radius, gap, 180.0 - gap, color)
+    draw_reticle_arc(cx, cy, radius, 180.0 + gap, 360.0 - gap, color)
+
+    -- 조금 안쪽에도 한 줄을 더 그려 저해상도에서도 링이 뭉개지지 않게 합니다.
+    draw_reticle_arc(cx, cy, inner_radius, gap, 180.0 - gap, color)
+    draw_reticle_arc(cx, cy, inner_radius, 180.0 + gap, 360.0 - gap, color)
+
+    -- 중앙의 작은 조준점
+    draw.filled_circle(cx, cy, math.max(2.5, 3.0 * scale), color, 16)
 end
 
-re.on_frame(function()
+-- draw.* API는 on_draw_ui에서 화면 좌표로 바로 그릴 수 있습니다.
+re.on_draw_ui(function()
     draw_focus_hud()
 end)
 
@@ -1328,8 +1346,8 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.3] loaded. " ..
-    "BFM-type-only weapon detection, instant hold-release + FocusMode HUD" ..
+    "[MHR_FocusMode v3.4] loaded. " ..
+    "BFM-type-only weapon detection, instant hold-release + center reticle HUD" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
     ", key=" ..
