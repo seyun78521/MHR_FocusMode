@@ -1,6 +1,6 @@
 --[[
-    ModFocusRise v1.2  -  Focus Aim for Monster Hunter Rise (REFramework)
-    안전 진단 버전: 회전 적용은 기본 OFF
+    ModFocusRise v1.3  -  Focus Aim for Monster Hunter Rise (REFramework)
+    v1.3: 기존 플레이어 회전을 보존하면서 Yaw만 상대적으로 적용
 
     설치: <MHRise 폴더>/reframework/autorun/ModFocusRise.lua
     설정: 게임 내 REFramework 창(Insert 키) -> "Focus Aim (Rise)" 트리 노드
@@ -23,7 +23,7 @@ local DEFAULTS = {
     smooth      = 0.35,     -- 0.0 = 즉시 스냅, 1.0 = 거의 안 돌아감
     yaw_offset  = 0.0,      -- 캐릭터가 180도 반대로 보면 3.14159 입력
     debug       = false,
-    apply_rotation = false,  -- v1.2: 안전 진단용. 기본 OFF
+    apply_rotation = false,  -- v1.3: 안전 진단용. 기본 OFF
 }
 
 local cfg = json.load_file(CFG_PATH) or {}
@@ -295,17 +295,21 @@ re.on_application_entry("LockScene", function()
 
         local target_yaw = math.atan(dx, dz) + cfg.yaw_offset
         local cur_yaw    = yaw_from_quat(ptr:call("get_Rotation"))
-        local new_yaw
+        local delta_yaw
 
         if cfg.smooth <= 0.001 then
-            new_yaw = target_yaw
+            delta_yaw = wrap_pi(target_yaw - cur_yaw)
         else
             local diff = wrap_pi(target_yaw - cur_yaw)
-            new_yaw = cur_yaw + diff * (1.0 - cfg.smooth)
+            delta_yaw = diff * (1.0 - cfg.smooth)
         end
 
         if cfg.apply_rotation then
-            ptr:call("set_Rotation", quat_from_yaw(new_yaw))
+            -- v1.3: 현재 회전(pitch/roll)을 버리지 않고 Yaw 변화량만 추가합니다.
+            -- 절대 회전으로 교체하면 플레이어 루트의 기존 자세가 사라질 수 있습니다.
+            local yaw_delta_quat = quat_from_yaw(delta_yaw)
+            local new_rotation = (yaw_delta_quat * ptr:call("get_Rotation")):normalized()
+            ptr:call("set_Rotation", new_rotation)
             apply_count = apply_count + 1
         end
     end)
@@ -348,7 +352,7 @@ re.on_draw_ui(function()
     changed, val = imgui.checkbox("디버그 표시", cfg.debug)
     if changed then cfg.debug = val; save_cfg() end
 
-    changed, val = imgui.checkbox("회전 적용 (v1.2 진단)", cfg.apply_rotation)
+    changed, val = imgui.checkbox("회전 적용 (v1.3 진단)", cfg.apply_rotation)
     if changed then cfg.apply_rotation = val; save_cfg() end
 
     if cfg.debug then
@@ -368,4 +372,4 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 
-log.info("[ModFocusRise v1.2] loaded. KeyboardKey=" .. tostring(key_name_value()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
+log.info("[ModFocusRise v1.3] loaded. KeyboardKey=" .. tostring(key_name_value()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
