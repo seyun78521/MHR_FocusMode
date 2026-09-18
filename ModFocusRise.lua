@@ -59,6 +59,7 @@ end
 --==========================================================================
 
 local kb_singleton, kb_tdef
+local key_prev_down = false
 
 local function get_keyboard()
     if not kb_singleton then
@@ -73,14 +74,31 @@ end
 local function key_down(vk)
     local d = get_keyboard()
     if not d then return false end
-    return d:call("getDown", vk) == true
+    local ok, result = pcall(function()
+        return d:call("isDown", vk) == true
+    end)
+    if not ok then
+        last_error = "keyboard isDown: " .. tostring(result)
+        return false
+    end
+    return result
 end
 
 -- 눌린 그 프레임에만 true (토글용)
 local function key_trg(vk)
     local d = get_keyboard()
     if not d then return false end
-    return d:call("getTrg", vk) == true
+    local ok, result = pcall(function()
+        return d:call("isDown", vk) == true
+    end)
+    if not ok then
+        last_error = "keyboard isDown(toggle): " .. tostring(result)
+        key_prev_down = false
+        return false
+    end
+    local trg = result and not key_prev_down
+    key_prev_down = result
+    return trg
 end
 
 --==========================================================================
@@ -160,11 +178,15 @@ re.on_frame(function()
         local d = get_keyboard()
         if d then
             for vk = 0x08, 0xFE do
-                if d:call("getTrg", vk) == true then
+                local ok, down = pcall(function()
+                    return d:call("isDown", vk) == true
+                end)
+                if ok and down then
                     if vk ~= 0x1B then            -- ESC = 취소
                         cfg.key = vk
                         save_cfg()
                     end
+                    key_prev_down = false
                     binding_key = false
                     break
                 end
@@ -177,6 +199,7 @@ re.on_frame(function()
     if not cfg.enabled then
         focus_active = false
         toggle_state = false
+        key_prev_down = false
         return
     end
 
@@ -279,6 +302,9 @@ re.on_draw_ui(function()
 
     if cfg.debug then
         imgui.text("focus_active: " .. tostring(focus_active))
+        imgui.text("keyboard: " .. tostring(get_keyboard() ~= nil))
+        imgui.text("key: " .. key_name(cfg.key) .. " (" .. tostring(cfg.key) .. ")")
+        imgui.text("key_down: " .. tostring(key_down(cfg.key)))
         imgui.text("player: " .. tostring(get_player() ~= nil))
         imgui.text("camera: " .. tostring(get_camera_transform() ~= nil))
         if last_error then imgui.text("last error: " .. last_error) end
