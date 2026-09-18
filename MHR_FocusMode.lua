@@ -1026,10 +1026,10 @@ end)
 -- 참고 이미지 기준 약 80% 크기로 줄이고, 링은 얇은 윤곽선 2줄이 아니라
 -- 실제로 흰색이 채워진 "띠"처럼 보이도록 여러 겹의 원호를 겹쳐 그립니다.
 local FOCUS_RETICLE_Y_RATIO = 0.45
-local FOCUS_RETICLE_BASE_RADIUS = 11.2
+local FOCUS_RETICLE_BASE_RADIUS = 9.4667
 local FOCUS_RETICLE_GAP_DEG = 11.0
 local FOCUS_RETICLE_SEGMENTS = 20
-local FOCUS_RETICLE_THICKNESS = 2.6
+local FOCUS_RETICLE_THICKNESS = 0.8667
 
 local function draw_reticle_arc_band(cx, cy, outer_radius, thickness, start_deg, end_deg, color, scale)
     local start_rad = math.rad(start_deg)
@@ -1368,8 +1368,8 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.5] loaded. " ..
-    "BFM-type-only weapon detection, instant hold-release + smaller filled-band reticle HUD" ..
+    "[MHR_FocusMode v3.6] loaded. " ..
+    "BFM-type-only weapon detection, instant hold-release + thin filled-band reticle HUD" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
     ", key=" ..
