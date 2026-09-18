@@ -1,5 +1,6 @@
 --[[
-    ModFocusRise.lua  -  Focus Aim for Monster Hunter Rise (REFramework)
+    ModFocusRise v1.2  -  Focus Aim for Monster Hunter Rise (REFramework)
+    안전 진단 버전: 회전 적용은 기본 OFF
 
     설치: <MHRise 폴더>/reframework/autorun/ModFocusRise.lua
     설정: 게임 내 REFramework 창(Insert 키) -> "Focus Aim (Rise)" 트리 노드
@@ -22,11 +23,17 @@ local DEFAULTS = {
     smooth      = 0.35,     -- 0.0 = 즉시 스냅, 1.0 = 거의 안 돌아감
     yaw_offset  = 0.0,      -- 캐릭터가 180도 반대로 보면 3.14159 입력
     debug       = false,
+    apply_rotation = false,  -- v1.2: 안전 진단용. 기본 OFF
 }
 
 local cfg = json.load_file(CFG_PATH) or {}
 for k, v in pairs(DEFAULTS) do
     if cfg[k] == nil then cfg[k] = v end
+end
+
+-- 기존 VK 코드 설정(0xA4)은 새 enum 방식으로 마이그레이션합니다.
+if cfg.key_name == nil then
+    cfg.key_name = "Menu"  -- via.hid.KeyboardKey.Menu = Alt 계열
 end
 
 local function save_cfg()
@@ -56,49 +63,100 @@ end
 
 --==========================================================================
 -- 3. 입력 (via.hid.Keyboard)
+--
+-- REFramework의 via.hid.Keyboard는 Windows VK 코드(예: 0xA4)를
+-- 그대로 받는다고 가정하지 않고, via.hid.KeyboardKey enum 값을
+-- 사용하는 것이 안전합니다. 기본키는 KeyboardKey.Menu(Alt)로 잡습니다.
 --==========================================================================
 
 local kb_singleton, kb_tdef
+local kb_key_tdef
 local key_prev_down = false
+local input_error = nil
 
 local function get_keyboard()
     if not kb_singleton then
         kb_singleton = sdk.get_native_singleton("via.hid.Keyboard")
         kb_tdef      = sdk.find_type_definition("via.hid.Keyboard")
+        kb_key_tdef  = sdk.find_type_definition("via.hid.KeyboardKey")
     end
-    if not kb_singleton then return nil end
+    if not kb_singleton or not kb_tdef or not kb_key_tdef then return nil end
     return sdk.call_native_func(kb_singleton, kb_tdef, "get_Device")
 end
 
+local function get_key_value(name)
+    if not kb_key_tdef or not name then return nil end
+    local field = kb_key_tdef:get_field(name)
+    if not field then return nil end
+    local ok, value = pcall(function() return field:get_data(nil) end)
+    if not ok then return nil end
+    return value
+end
+
+local function key_name_value()
+    return cfg.key_name or "Menu"
+end
+
+local function get_bound_key_value()
+    local v = get_key_value(key_name_value())
+    if v == nil then
+        input_error = "KeyboardKey not found: " .. tostring(key_name_value())
+    end
+    return v
+end
+
 -- 눌려 있는 동안 계속 true (홀드용)
-local function key_down(vk)
+local function key_down()
     local d = get_keyboard()
     if not d then return false end
+    local key = get_bound_key_value()
+    if key == nil then return false end
     local ok, result = pcall(function()
-        return d:call("isDown", vk) == true
+        return d:call("isDown", key) == true
     end)
     if not ok then
-        last_error = "keyboard isDown: " .. tostring(result)
+        input_error = "keyboard isDown: " .. tostring(result)
         return false
     end
     return result
 end
 
--- 눌린 그 프레임에만 true (토글용)
-local function key_trg(vk)
-    local d = get_keyboard()
-    if not d then return false end
-    local ok, result = pcall(function()
-        return d:call("isDown", vk) == true
-    end)
-    if not ok then
-        last_error = "keyboard isDown(toggle): " .. tostring(result)
-        key_prev_down = false
-        return false
-    end
-    local trg = result and not key_prev_down
-    key_prev_down = result
+-- 눌린 순간만 true (토글용)
+local function key_trg()
+    local now_down = key_down()
+    local trg = now_down and not key_prev_down
+    key_prev_down = now_down
     return trg
+end
+
+-- 현재 장치가 인식하는 KeyboardKey enum을 찾아 새 키를 바인딩합니다.
+local function capture_key()
+    local d = get_keyboard()
+    if not d or not kb_key_tdef then return false end
+
+    for _, field in ipairs(kb_key_tdef:get_fields()) do
+        if field:is_static() then
+            local name = field:get_name()
+            local ok_value, value = pcall(function() return field:get_data(nil) end)
+            if ok_value and value ~= nil then
+                local ok_down, down = pcall(function()
+                    return d:call("isDown", value) == true
+                end)
+                if ok_down and down then
+                    -- ESC는 취소
+                    if name ~= "Escape" then
+                        cfg.key_name = name
+                        cfg.key = value -- 호환/표시용으로 함께 저장
+                        save_cfg()
+                    end
+                    key_prev_down = false
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
 end
 
 --==========================================================================
@@ -175,22 +233,8 @@ local binding_key  = false      -- 설정창에서 키 입력 대기중인지
 re.on_frame(function()
     -- 키 바인딩 캡처 모드
     if binding_key then
-        local d = get_keyboard()
-        if d then
-            for vk = 0x08, 0xFE do
-                local ok, down = pcall(function()
-                    return d:call("isDown", vk) == true
-                end)
-                if ok and down then
-                    if vk ~= 0x1B then            -- ESC = 취소
-                        cfg.key = vk
-                        save_cfg()
-                    end
-                    key_prev_down = false
-                    binding_key = false
-                    break
-                end
-            end
+        if capture_key() then
+            binding_key = false
         end
         focus_active = false
         return
@@ -204,10 +248,10 @@ re.on_frame(function()
     end
 
     if cfg.mode == 2 then
-        if key_trg(cfg.key) then toggle_state = not toggle_state end
+        if key_trg() then toggle_state = not toggle_state end
         focus_active = toggle_state
     else
-        focus_active = key_down(cfg.key)     -- 누르고 있는 동안만
+        focus_active = key_down()            -- 누르고 있는 동안만
     end
 end)
 
@@ -220,6 +264,7 @@ end)
 --==========================================================================
 
 local last_error = nil
+local apply_count = 0
 
 re.on_application_entry("LockScene", function()
     if not focus_active then return end
@@ -259,7 +304,10 @@ re.on_application_entry("LockScene", function()
             new_yaw = cur_yaw + diff * (1.0 - cfg.smooth)
         end
 
-        ptr:call("set_Rotation", quat_from_yaw(new_yaw))
+        if cfg.apply_rotation then
+            ptr:call("set_Rotation", quat_from_yaw(new_yaw))
+            apply_count = apply_count + 1
+        end
     end)
 
     if not ok then last_error = tostring(err) end
@@ -280,7 +328,7 @@ re.on_draw_ui(function()
     changed, val = imgui.combo("작동 방식", cfg.mode, { "홀드 (누르는 동안만)", "토글" })
     if changed then cfg.mode = val; toggle_state = false; save_cfg() end
 
-    imgui.text("현재 키: " .. key_name(cfg.key))
+    imgui.text("현재 키: " .. tostring(key_name_value()))
     imgui.same_line()
     if binding_key then
         imgui.text("  << 아무 키나 누르세요 (ESC 취소)")
@@ -300,17 +348,24 @@ re.on_draw_ui(function()
     changed, val = imgui.checkbox("디버그 표시", cfg.debug)
     if changed then cfg.debug = val; save_cfg() end
 
+    changed, val = imgui.checkbox("회전 적용 (v1.2 진단)", cfg.apply_rotation)
+    if changed then cfg.apply_rotation = val; save_cfg() end
+
     if cfg.debug then
         imgui.text("focus_active: " .. tostring(focus_active))
         imgui.text("keyboard: " .. tostring(get_keyboard() ~= nil))
-        imgui.text("key: " .. key_name(cfg.key) .. " (" .. tostring(cfg.key) .. ")")
-        imgui.text("key_down: " .. tostring(key_down(cfg.key)))
+        imgui.text("KeyboardKey: " .. tostring(key_name_value()))
+        imgui.text("key value: " .. tostring(get_bound_key_value()))
+        imgui.text("key_down: " .. tostring(key_down()))
         imgui.text("player: " .. tostring(get_player() ~= nil))
         imgui.text("camera: " .. tostring(get_camera_transform() ~= nil))
+        imgui.text("apply_rotation: " .. tostring(cfg.apply_rotation))
+        imgui.text("apply_count: " .. tostring(apply_count))
+        if input_error then imgui.text("input error: " .. input_error) end
         if last_error then imgui.text("last error: " .. last_error) end
     end
 
     imgui.tree_pop()
 end)
 
-log.info("[ModFocusRise] loaded. key=" .. key_name(cfg.key))
+log.info("[ModFocusRise v1.2] loaded. KeyboardKey=" .. tostring(key_name_value()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
