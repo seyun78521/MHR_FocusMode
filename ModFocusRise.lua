@@ -1,6 +1,6 @@
 --[[
-    ModFocusRise v1.4  -  Focus Aim for Monster Hunter Rise (REFramework)
-    v1.4: LockScene pre 단계에서 프레임당 1회만 Yaw 적용하여 다중 호출/게임 FSM 충돌을 줄임
+    ModFocusRise v1.5  -  Focus Aim for Monster Hunter Rise (REFramework)
+    v1.5: Quaternion 인자 순서(w,x,y,z) 수정. v1.4의 뒤집힘 원인 수정
 
     설치: <MHRise 폴더>/reframework/autorun/ModFocusRise.lua
     설정: 게임 내 REFramework 창(Insert 키) -> "Focus Aim (Rise)" 트리 노드
@@ -213,7 +213,7 @@ end
 
 local function quat_from_yaw(yaw)
     local h = yaw * 0.5
-    return Quaternion.new(0.0, math.sin(h), 0.0, math.cos(h))
+    return Quaternion.new(math.cos(h), 0.0, math.sin(h), 0.0)
 end
 
 local function wrap_pi(a)
@@ -368,7 +368,7 @@ re.on_draw_ui(function()
     changed, val = imgui.checkbox("디버그 표시", cfg.debug)
     if changed then cfg.debug = val; save_cfg() end
 
-    changed, val = imgui.checkbox("회전 적용 (v1.4 진단)", cfg.apply_rotation)
+    changed, val = imgui.checkbox("회전 적용 (v1.5 진단)", cfg.apply_rotation)
     if changed then cfg.apply_rotation = val; save_cfg() end
 
     if cfg.debug then
@@ -388,4 +388,4 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 
-log.info("[ModFocusRise v1.4] loaded. KeyboardKey=" .. tostring(key_name_value()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
+log.info("[ModFocusRise v1.5] loaded. KeyboardKey=" .. tostring(key_name_value()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
