@@ -1107,8 +1107,9 @@ local function draw_focus_hud()
     )
 end
 
--- draw.* API는 on_draw_ui에서 화면 좌표로 바로 그릴 수 있습니다.
-re.on_draw_ui(function()
+-- 조준경 HUD는 REFramework 창의 표시 여부와 무관하게
+-- 게임 화면에 계속 그려져야 하므로 on_frame에서 렌더합니다.
+re.on_frame(function()
     draw_focus_hud()
 end)
 
@@ -1368,8 +1369,8 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.6] loaded. " ..
-    "BFM-type-only weapon detection, instant hold-release + thin filled-band reticle HUD" ..
+    "[MHR_FocusMode v3.7] loaded. " ..
+    "BFM-type-only weapon detection, instant hold-release + persistent HUD reticle" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
     ", key=" ..
