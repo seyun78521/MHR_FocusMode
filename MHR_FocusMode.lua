@@ -1,9 +1,21 @@
 --[[
-    MHR_FocusMode v3.0 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v3.1 - Focus Aim for Monster Hunter Rise (REFramework)
 
-    v3.0 핵심:
-      - 평상시 카메라 추적은 별도의 Activity 상태에 의존하지 않습니다.
-        -> Activity 상태 전환 때문에 생기던 1프레임 방향 복귀 가능성을 제거합니다.
+    v3.1 변경점 (v3.0 대비):
+      - v1.8의 Activity Gate(정지 판정)를 되살렸습니다.
+        -> "가만히 서 있을 때"는 집중모드가 켜져 있어도 평상시 카메라 추적을
+           적용하지 않습니다. (ModFocusRise v1.8의 activity_active 판정 재사용)
+      - Activity Gate는 "평상시 추적"에만 적용됩니다.
+        공격 고정(attack lock)과 공격 종료 직후 handoff는 정지 여부와
+        무관하게 항상 그대로 동작합니다. (BFM Type 기반 타이밍 그대로 사용)
+      - 즉, 최종 동작:
+          1) 정지 상태(이동/회전 없음): 집중모드가 켜져 있어도 방향을 돌리지 않음.
+          2) 이동/회전 중: 평상시처럼 카메라 방향을 계속 따라감.
+          3) 좌클릭 또는 우클릭(공격) 시: 클릭한 순간의 카메라 방향으로
+             즉시 고정하고, 그 방향을 BFM Type으로 판별한 무기별 지정 시간
+             동안 강제로 유지함 (정지/이동 여부와 무관).
+
+    v3.0 핵심 (유지됨):
       - 공격 입력(L/R 클릭) 순간의 카메라 방향을 저장하고,
         현재 플레이어의 BFM Type 하나만으로 무기를 자동 판별합니다.
       - 무기 판별에 다른 무기 객체 탐색이나 부모 타입 탐색,
@@ -13,7 +25,7 @@
       - LockScene 전/후 + PrepareRendering 전/후에서 재적용합니다.
       - 공격 종료 직후에는 현재 카메라 방향을 이어받는 handoff 구간을 유지합니다.
       - v2.5의 BFM 상태 setter/getter 탐색은 제거했습니다.
-        v3.0에서 필요한 BFM 정보는 무기 판별용 Type 하나뿐입니다.
+        v3.1에서 필요한 BFM 정보는 무기 판별용 Type 하나뿐입니다.
 
     Better Focus Mode Timing:
       GreatSword=0.24
@@ -64,6 +76,14 @@ local DEFAULTS = {
 
     -- 공격 고정 -> 평상시 추적 사이를 일부러 겹치게 만들어 1프레임 공백 방지.
     attack_handoff_seconds = 0.100,
+
+    -- v1.8에서 가져온 Activity Gate.
+    -- "평상시 추적"에만 적용됩니다 (공격 고정/handoff에는 영향 없음).
+    -- true면 캐릭터가 정지해 있을 때는 카메라 방향을 따라가지 않습니다.
+    activity_gate           = true,
+    activity_pos_threshold  = 0.01,   -- 프레임당 위치 변화량(미터)
+    activity_yaw_threshold  = 0.015,  -- 프레임당 회전 변화량(rad)
+    activity_hold_frames    = 12,     -- 활동 감지 후 추적을 유지할 프레임 수
 }
 
 local cfg = json.load_file(CFG_PATH) or {}
@@ -542,6 +562,89 @@ local function start_attack_handoff()
 end
 
 --==========================================================================
+-- 6b. Activity Gate (v1.8 재사용) - "평상시 추적"에만 적용
+--==========================================================================
+
+-- ModFocusRise v1.8의 정지 판정을 그대로 가져옵니다.
+-- 공격 고정(attack lock)/handoff에는 영향을 주지 않고,
+-- "평상시 카메라 추적"에만 게이트로 사용합니다.
+local activity_active = false
+local activity_frames_left = 0
+local activity_initialized = false
+local activity_last_pos = nil
+local activity_last_yaw = nil
+
+local function copy_vec3(v)
+    return { x = v.x, y = v.y, z = v.z }
+end
+
+local function reset_activity()
+    activity_active = false
+    activity_frames_left = 0
+    activity_initialized = false
+    activity_last_pos = nil
+    activity_last_yaw = nil
+end
+
+local function update_activity()
+    if not cfg.activity_gate then
+        activity_active = true
+        return true
+    end
+
+    local player = get_player()
+    local ptr = get_transform(player)
+    if not ptr then
+        activity_active = false
+        return false
+    end
+
+    local ok, result = pcall(function()
+        local pos = ptr:call("get_Position")
+        local rot = ptr:call("get_Rotation")
+        local yaw = yaw_from_quat(rot)
+
+        if not activity_initialized or not activity_last_pos or activity_last_yaw == nil then
+            activity_last_pos = copy_vec3(pos)
+            activity_last_yaw = yaw
+            activity_initialized = true
+            activity_active = false
+            return false
+        end
+
+        local dx = pos.x - activity_last_pos.x
+        local dy = pos.y - activity_last_pos.y
+        local dz = pos.z - activity_last_pos.z
+        local moved =
+            (dx * dx + dy * dy + dz * dz) >=
+            (cfg.activity_pos_threshold * cfg.activity_pos_threshold)
+
+        local yaw_delta = math.abs(wrap_pi(yaw - activity_last_yaw))
+        local rotated = yaw_delta >= cfg.activity_yaw_threshold
+
+        activity_last_pos = copy_vec3(pos)
+        activity_last_yaw = yaw
+
+        if moved or rotated then
+            activity_frames_left = cfg.activity_hold_frames
+        elseif activity_frames_left > 0 then
+            activity_frames_left = activity_frames_left - 1
+        end
+
+        activity_active = activity_frames_left > 0
+        return activity_active
+    end)
+
+    if not ok then
+        last_error = "activity: " .. tostring(result)
+        activity_active = false
+        return false
+    end
+
+    return result
+end
+
+--==========================================================================
 -- 7. 입력 / 상태 업데이트
 --==========================================================================
 
@@ -556,6 +659,7 @@ re.on_frame(function()
 
         focus_active = false
         reset_attack_lock()
+        reset_activity()
         return
     end
 
@@ -566,6 +670,7 @@ re.on_frame(function()
         mouse_prev_l = false
         mouse_prev_r = false
         reset_attack_lock()
+        reset_activity()
         return
     end
 
@@ -585,8 +690,14 @@ re.on_frame(function()
 
     if not focus_active then
         reset_attack_lock()
+        reset_activity()
         return
     end
+
+    -- 정지/이동 판정은 공격 여부와 무관하게 매 프레임 갱신합니다.
+    -- (공격 고정/handoff 적용 여부에는 영향을 주지 않고,
+    --  "평상시 추적" 적용 여부에만 사용됩니다.)
+    update_activity()
 
     -- BFM Type만으로 현재 무기를 갱신합니다.
     local player = get_player()
@@ -780,6 +891,10 @@ local function apply_normal_camera_now()
     if attack_lock_active then return end
     if attack_handoff_remaining > 0.0 then return end
 
+    -- 정지 상태에서는 "평상시 추적"을 적용하지 않습니다.
+    -- (공격 고정/handoff는 이 게이트의 영향을 받지 않습니다.)
+    if cfg.activity_gate and not activity_active then return end
+
     local target_yaw = get_camera_target_yaw()
     if target_yaw == nil then return end
 
@@ -903,6 +1018,60 @@ re.on_draw_ui(function()
     end
 
     imgui.separator()
+    imgui.text("정지 시 추적 제외 (Activity Gate)")
+
+    changed, val = imgui.checkbox(
+        "가만히 서 있을 때는 추적 안 함",
+        cfg.activity_gate
+    )
+    if changed then
+        cfg.activity_gate = val
+        reset_activity()
+        save_cfg()
+    end
+
+    if cfg.activity_gate then
+        changed, val = imgui.slider_float(
+            "움직임 감도(m)",
+            cfg.activity_pos_threshold,
+            0.001,
+            0.05,
+            "%.3f"
+        )
+        if changed then
+            cfg.activity_pos_threshold = val
+            save_cfg()
+        end
+
+        changed, val = imgui.slider_float(
+            "회전 감도(rad)",
+            cfg.activity_yaw_threshold,
+            0.001,
+            0.10,
+            "%.3f"
+        )
+        if changed then
+            cfg.activity_yaw_threshold = val
+            save_cfg()
+        end
+
+        changed, val = imgui.slider_int(
+            "추적 유지 프레임",
+            cfg.activity_hold_frames,
+            1,
+            60
+        )
+        if changed then
+            cfg.activity_hold_frames = val
+            save_cfg()
+        end
+
+        imgui.text(
+            "※ 공격 고정/handoff는 이 게이트와 무관하게 항상 동작합니다."
+        )
+    end
+
+    imgui.separator()
     imgui.text("공격 시작 방향 고정")
 
     update_weapon_profile(get_player())
@@ -979,6 +1148,15 @@ re.on_draw_ui(function()
         update_weapon_profile(get_player())
 
         imgui.text("focus_active: " .. tostring(focus_active))
+        imgui.text(
+            "activity_active: " ..
+            tostring(activity_active) ..
+            " (gate=" .. tostring(cfg.activity_gate) .. ")"
+        )
+        imgui.text(
+            "activity_frames_left: " ..
+            tostring(activity_frames_left)
+        )
         imgui.text("attack lock: " .. tostring(attack_lock_active))
         imgui.text(
             "attack remaining: " ..
@@ -1023,8 +1201,10 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.0] loaded. " ..
+    "[MHR_FocusMode v3.1] loaded. " ..
     "BFM-type-only weapon detection" ..
+    ", activity_gate=" ..
+    tostring(cfg.activity_gate) ..
     ", key=" ..
     tostring(key_display_name()) ..
     ", lock_extension=" ..
