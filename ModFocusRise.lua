@@ -1,6 +1,6 @@
 --[[
-    ModFocusRise v1.3  -  Focus Aim for Monster Hunter Rise (REFramework)
-    v1.3: 기존 플레이어 회전을 보존하면서 Yaw만 상대적으로 적용
+    ModFocusRise v1.4  -  Focus Aim for Monster Hunter Rise (REFramework)
+    v1.4: LockScene pre 단계에서 프레임당 1회만 Yaw 적용하여 다중 호출/게임 FSM 충돌을 줄임
 
     설치: <MHRise 폴더>/reframework/autorun/ModFocusRise.lua
     설정: 게임 내 REFramework 창(Insert 키) -> "Focus Aim (Rise)" 트리 노드
@@ -23,7 +23,7 @@ local DEFAULTS = {
     smooth      = 0.35,     -- 0.0 = 즉시 스냅, 1.0 = 거의 안 돌아감
     yaw_offset  = 0.0,      -- 캐릭터가 180도 반대로 보면 3.14159 입력
     debug       = false,
-    apply_rotation = false,  -- v1.3: 안전 진단용. 기본 OFF
+    apply_rotation = false,  -- v1.4: 안전 진단용. 기본 OFF
 }
 
 local cfg = json.load_file(CFG_PATH) or {}
@@ -265,9 +265,22 @@ end)
 
 local last_error = nil
 local apply_count = 0
+local frame_id = 0
+local last_apply_frame = -1
 
-re.on_application_entry("LockScene", function()
+-- 프레임마다 한 번만 회전 적용.
+-- MHRise 예제에서 Transform 수정은 LockScene의 pre 단계에서 수행됩니다.
+re.on_frame(function()
+    frame_id = frame_id + 1
+end)
+
+re.on_pre_application_entry("LockScene", function()
     if not focus_active then return end
+    if not cfg.apply_rotation then return end
+
+    -- LockScene이 한 프레임에 여러 번 들어오더라도 1회만 적용
+    if last_apply_frame == frame_id then return end
+    last_apply_frame = frame_id
 
     local ok, err = pcall(function()
         local player = get_player()
@@ -287,31 +300,34 @@ re.on_application_entry("LockScene", function()
             local ctr = get_camera_transform()
             if not ctr then return end
             local cpos = ctr:call("get_Position")
-            -- 카메라는 캐릭터 뒤에 있으므로 (플레이어 - 카메라) 가 전방 벡터
             dx, dz = ppos.x - cpos.x, ppos.z - cpos.z
         end
 
         if (dx * dx + dz * dz) < 0.0001 then return end
 
         local target_yaw = math.atan(dx, dz) + cfg.yaw_offset
-        local cur_yaw    = yaw_from_quat(ptr:call("get_Rotation"))
-        local delta_yaw
+        local current_rotation = ptr:call("get_Rotation")
+        local cur_yaw = yaw_from_quat(current_rotation)
+        local diff = wrap_pi(target_yaw - cur_yaw)
 
+        local delta_yaw
         if cfg.smooth <= 0.001 then
-            delta_yaw = wrap_pi(target_yaw - cur_yaw)
+            delta_yaw = diff
         else
-            local diff = wrap_pi(target_yaw - cur_yaw)
             delta_yaw = diff * (1.0 - cfg.smooth)
         end
 
-        if cfg.apply_rotation then
-            -- v1.3: 현재 회전(pitch/roll)을 버리지 않고 Yaw 변화량만 추가합니다.
-            -- 절대 회전으로 교체하면 플레이어 루트의 기존 자세가 사라질 수 있습니다.
-            local yaw_delta_quat = quat_from_yaw(delta_yaw)
-            local new_rotation = (yaw_delta_quat * ptr:call("get_Rotation")):normalized()
-            ptr:call("set_Rotation", new_rotation)
-            apply_count = apply_count + 1
-        end
+        -- 안전장치: 한 번의 적용에서 90도보다 크게 회전시키지 않음.
+        -- 비정상적인 quaternion/동기화 상황에서 대형 회전으로 튀는 것을 방지합니다.
+        local max_step = math.pi * 0.5
+        if delta_yaw > max_step then delta_yaw = max_step end
+        if delta_yaw < -max_step then delta_yaw = -max_step end
+
+        local yaw_delta_quat = quat_from_yaw(delta_yaw)
+        local new_rotation = (yaw_delta_quat * current_rotation):normalized()
+
+        ptr:call("set_Rotation", new_rotation)
+        apply_count = apply_count + 1
     end)
 
     if not ok then last_error = tostring(err) end
@@ -352,7 +368,7 @@ re.on_draw_ui(function()
     changed, val = imgui.checkbox("디버그 표시", cfg.debug)
     if changed then cfg.debug = val; save_cfg() end
 
-    changed, val = imgui.checkbox("회전 적용 (v1.3 진단)", cfg.apply_rotation)
+    changed, val = imgui.checkbox("회전 적용 (v1.4 진단)", cfg.apply_rotation)
     if changed then cfg.apply_rotation = val; save_cfg() end
 
     if cfg.debug then
@@ -372,4 +388,4 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 
-log.info("[ModFocusRise v1.3] loaded. KeyboardKey=" .. tostring(key_name_value()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
+log.info("[ModFocusRise v1.4] loaded. KeyboardKey=" .. tostring(key_name_value()) .. ", apply_rotation=" .. tostring(cfg.apply_rotation))
