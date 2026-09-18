@@ -1,6 +1,7 @@
 --[[
     ModFocusRise v1.9  -  Focus Aim for Monster Hunter Rise (REFramework)
-    v1.9: 정지 중 회전 추적을 막고, 캐릭터가 이동/회전한 뒤 잠시 동안만 카메라 방향을 따라가도록 활동 감지를 추가.
+    v1.9: Monster Hunter: World의 Better Focus Mode 구조를 참고한 공격 보정 창을 추가.
+          공격 입력 후 짧은 시간만 카메라 방향을 보정하고, 긴 모션 전체를 계속 추적하지 않음.
 
     설치: <MHRise 폴더>/reframework/autorun/ModFocusRise.lua
     설정: 게임 내 REFramework 창(Insert 키) -> "Focus Aim (Rise)" 트리 노드
@@ -23,10 +24,16 @@ local DEFAULTS = {
     yaw_offset  = 0.0,      -- 캐릭터가 180도 반대로 보면 3.14159 입력
     debug       = false,
     apply_rotation = false,  -- v1.4: 안전 진단용. 기본 OFF
-    activity_gate = true,     -- v1.9: 이동/행동 중에만 회전 적용
+    activity_gate = true,     -- v1.8: 이동/행동 중에만 회전 적용
     activity_pos_threshold = 0.01, -- 프레임당 위치 변화량(미터)
     activity_yaw_threshold = 0.015, -- 프레임당 회전 변화량(rad)
-    activity_hold_frames = 12, -- 활동 감지 후 회전을 유지할 프레임 수
+    activity_hold_frames = 12, -- v1.8 활동 감지 모드에서만 사용
+
+    -- v1.9 Better Focus 스타일
+    correction_mode = 2,        -- 1 = v1.8 활동 감지, 2 = 공격 보정 창
+    attack_window_frames = 12,  -- 약 0.20초 @ 60fps
+    normal_attack_button = "L",
+    special_attack_button = "R",
 }
 
 local cfg = json.load_file(CFG_PATH) or {}
@@ -173,7 +180,65 @@ local function capture_key()
 end
 
 --==========================================================================
--- 4. 게임 오브젝트 접근
+-- 4. 공격 입력 (via.hid.Mouse)
+-- Better Focus Mode의 KBM 입력 구조를 참고합니다.
+-- L/R 마우스 버튼을 일반/특수 공격 입력으로 사용합니다.
+--==========================================================================
+
+local mouse_singleton, mouse_tdef, mouse_button_tdef
+local mouse_prev_l = false
+local mouse_prev_r = false
+local mouse_error = nil
+
+local function get_mouse()
+    if not mouse_singleton then
+        mouse_singleton = sdk.get_native_singleton("via.hid.Mouse")
+        mouse_tdef = sdk.find_type_definition("via.hid.Mouse")
+        mouse_button_tdef = sdk.find_type_definition("via.hid.MouseButton")
+    end
+    if not mouse_singleton or not mouse_tdef or not mouse_button_tdef then return nil end
+    return sdk.call_native_func(mouse_singleton, mouse_tdef, "get_Device")
+end
+
+local function get_mouse_button_value(name)
+    if not mouse_button_tdef then return nil end
+    local field = mouse_button_tdef:get_field(name)
+    if not field then
+        mouse_error = "MouseButton not found: " .. tostring(name)
+        return nil
+    end
+    local ok, value = pcall(function() return field:get_data(nil) end)
+    if not ok then
+        mouse_error = "MouseButton get_data failed: " .. tostring(name)
+        return nil
+    end
+    return value
+end
+
+local function mouse_down(name)
+    local m = get_mouse()
+    if not m then return false end
+    local button = get_mouse_button_value(name)
+    if button == nil then return false end
+    local ok, result = pcall(function() return m:call("isDown", button) == true end)
+    if not ok then
+        mouse_error = "mouse isDown: " .. tostring(result)
+        return false
+    end
+    return result
+end
+
+local function update_attack_trigger()
+    local l = mouse_down(cfg.normal_attack_button)
+    local r = mouse_down(cfg.special_attack_button)
+    local triggered = (l and not mouse_prev_l) or (r and not mouse_prev_r)
+    mouse_prev_l = l
+    mouse_prev_r = r
+    return triggered
+end
+
+--==========================================================================
+-- 5. 게임 오브젝트 접근
 --==========================================================================
 
 local function get_player()
@@ -234,7 +299,7 @@ local focus_active = false
 local toggle_state = false
 local binding_key  = false      -- 설정창에서 키 입력 대기중인지
 
--- v1.9 활동 감지 상태
+-- v1.8 활동 감지 상태
 local activity_active = false
 local activity_frames_left = 0
 local activity_initialized = false
@@ -245,12 +310,23 @@ local apply_count = 0
 local frame_id = 0
 local last_apply_frame = -1
 
+-- v1.9 attack correction window
+local attack_correction_active = false
+local attack_frames_left = 0
+local attack_triggered = false
+
 local function reset_activity()
     activity_active = false
     activity_frames_left = 0
     activity_initialized = false
     activity_last_pos = nil
     activity_last_yaw = nil
+end
+
+local function reset_attack_window()
+    attack_correction_active = false
+    attack_frames_left = 0
+    attack_triggered = false
 end
 
 local function copy_vec3(v)
@@ -314,13 +390,11 @@ local function update_activity()
 end
 
 re.on_frame(function()
-    -- 키 바인딩 캡처 모드
+    -- v1.9: 공격 입력으로 correction window를 시작합니다.
     if binding_key then
-        if capture_key() then
-            binding_key = false
-        end
         focus_active = false
         reset_activity()
+        reset_attack_window()
         return
     end
 
@@ -328,7 +402,10 @@ re.on_frame(function()
         focus_active = false
         toggle_state = false
         key_prev_down = false
+        mouse_prev_l = false
+        mouse_prev_r = false
         reset_activity()
+        reset_attack_window()
         return
     end
 
@@ -336,12 +413,31 @@ re.on_frame(function()
         if key_trg() then toggle_state = not toggle_state end
         focus_active = toggle_state
     else
-        focus_active = key_down()            -- 누르고 있는 동안만
+        focus_active = key_down()
     end
 
     if not focus_active then
         reset_activity()
+        reset_attack_window()
+        update_attack_trigger() -- 입력 엣지 동기화
+        return
+    end
+
+    if cfg.correction_mode == 2 then
+        if update_attack_trigger() then
+            attack_correction_active = true
+            attack_frames_left = cfg.attack_window_frames
+            attack_triggered = true
+        elseif attack_correction_active then
+            attack_frames_left = attack_frames_left - 1
+            if attack_frames_left <= 0 then
+                attack_frames_left = 0
+                attack_correction_active = false
+            end
+        end
+        activity_active = false
     else
+        reset_attack_window()
         update_activity()
     end
 end)
@@ -363,7 +459,12 @@ end)
 re.on_pre_application_entry("LockScene", function()
     if not focus_active then return end
     if not cfg.apply_rotation then return end
-    if cfg.activity_gate and not activity_active then return end
+
+    if cfg.correction_mode == 2 then
+        if not attack_correction_active then return end
+    elseif cfg.activity_gate and not activity_active then
+        return
+    end
 
     -- LockScene이 한 프레임에 여러 번 들어오더라도 1회만 적용
     if last_apply_frame == frame_id then return end
@@ -422,44 +523,62 @@ re.on_draw_ui(function()
 
     local changed, val
 
-    changed, val = imgui.checkbox("Enable Mod", cfg.enabled)
+    changed, val = imgui.checkbox("모드 활성화", cfg.enabled)
     if changed then cfg.enabled = val; save_cfg() end
 
-    changed, val = imgui.combo("Operation Mode", cfg.mode, { "Hold", "Toggle" })
+    changed, val = imgui.combo("작동 방식", cfg.mode, { "홀드 (누르는 동안만)", "토글" })
     if changed then cfg.mode = val; toggle_state = false; save_cfg() end
 
-    imgui.text("Current Key: " .. tostring(key_display_name()))
+    imgui.text("현재 키: " .. tostring(key_display_name()))
     imgui.same_line()
     if binding_key then
-        imgui.text("  << Press any key (ESC to cancel)")
-    elseif imgui.button("Change Key") then
+        imgui.text("  << 아무 키나 누르세요 (ESC 취소)")
+    elseif imgui.button("키 변경") then
         binding_key = true
     end
 
-    changed, val = imgui.slider_float("Smoothness", cfg.smooth, 0.0, 0.95, "%.2f")
+    changed, val = imgui.slider_float("부드러움", cfg.smooth, 0.0, 0.95, "%.2f")
     if changed then cfg.smooth = val; save_cfg() end
 
-    changed, val = imgui.slider_float("Yaw Offset (rad)", cfg.yaw_offset, -3.15, 3.15, "%.3f")
+    changed, val = imgui.slider_float("Yaw 보정(rad)", cfg.yaw_offset, -3.15, 3.15, "%.3f")
     if changed then cfg.yaw_offset = val; save_cfg() end
 
-    changed, val = imgui.checkbox("Rotate Only During Activity", cfg.activity_gate)
+    changed, val = imgui.combo("보정 방식", cfg.correction_mode, {
+        "v1.8 활동 감지",
+        "Better Focus 공격 보정"
+    })
+    if changed then
+        cfg.correction_mode = val
+        reset_activity()
+        reset_attack_window()
+        save_cfg()
+    end
+
+    if cfg.correction_mode == 2 then
+        imgui.text("공격 입력: 마우스 L / R")
+        changed, val = imgui.slider_int("공격 보정 프레임", cfg.attack_window_frames, 4, 24)
+        if changed then cfg.attack_window_frames = val; save_cfg() end
+        imgui.text("공격 시작 후 짧은 보정 창 동안만 카메라를 따라갑니다.")
+    else
+    changed, val = imgui.checkbox("행동할 때만 회전", cfg.activity_gate)
     if changed then cfg.activity_gate = val; save_cfg(); reset_activity() end
 
     if cfg.activity_gate then
-        changed, val = imgui.slider_float("Movement Sensitivity (m)", cfg.activity_pos_threshold, 0.001, 0.05, "%.3f")
+        changed, val = imgui.slider_float("움직임 감도(m)", cfg.activity_pos_threshold, 0.001, 0.05, "%.3f")
         if changed then cfg.activity_pos_threshold = val; save_cfg() end
 
-        changed, val = imgui.slider_float("Rotation Sensitivity (rad)", cfg.activity_yaw_threshold, 0.001, 0.10, "%.3f")
+        changed, val = imgui.slider_float("회전 감도(rad)", cfg.activity_yaw_threshold, 0.001, 0.10, "%.3f")
         if changed then cfg.activity_yaw_threshold = val; save_cfg() end
 
-        changed, val = imgui.slider_int("Tracking Hold Frames", cfg.activity_hold_frames, 1, 60)
+        changed, val = imgui.slider_int("추적 유지 프레임", cfg.activity_hold_frames, 1, 60)
         if changed then cfg.activity_hold_frames = val; save_cfg() end
     end
+    end
 
-    changed, val = imgui.checkbox("Show Debug Info", cfg.debug)
+    changed, val = imgui.checkbox("디버그 표시", cfg.debug)
     if changed then cfg.debug = val; save_cfg() end
 
-    changed, val = imgui.checkbox("Apply Rotation", cfg.apply_rotation)
+    changed, val = imgui.checkbox("회전 적용", cfg.apply_rotation)
     if changed then cfg.apply_rotation = val; save_cfg() end
 
     if cfg.debug then
@@ -474,8 +593,16 @@ re.on_draw_ui(function()
         imgui.text("activity_gate: " .. tostring(cfg.activity_gate))
         imgui.text("activity_active: " .. tostring(activity_active))
         imgui.text("activity_frames_left: " .. tostring(activity_frames_left))
+        imgui.text("correction_mode: " .. tostring(cfg.correction_mode))
+        imgui.text("mouse: " .. tostring(get_mouse() ~= nil))
+        imgui.text("normal attack: " .. tostring(mouse_down(cfg.normal_attack_button)))
+        imgui.text("special attack: " .. tostring(mouse_down(cfg.special_attack_button)))
+        imgui.text("attack_triggered: " .. tostring(attack_triggered))
+        imgui.text("attack_correction_active: " .. tostring(attack_correction_active))
+        imgui.text("attack_frames_left: " .. tostring(attack_frames_left))
         imgui.text("apply_count: " .. tostring(apply_count))
         if input_error then imgui.text("input error: " .. input_error) end
+        if mouse_error then imgui.text("mouse error: " .. mouse_error) end
         if last_error then imgui.text("last error: " .. last_error) end
     end
 
