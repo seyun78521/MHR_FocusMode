@@ -1,5 +1,20 @@
 --[[
-    MHR_FocusMode v3.4 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v3.9 - Focus Aim for Monster Hunter Rise (REFramework)
+
+    v3.9 변경점 (v3.8 대비):
+      - 입력 장치를 "키보드+마우스(KBM)" 또는 "컨트롤러"로 선택할 수 있습니다.
+        컨트롤러를 선택하면 집중모드 버튼 / 공격1 버튼 / 공격2 버튼을
+        원하는 컨트롤러 버튼으로 직접 바인딩할 수 있습니다.
+        (키보드 키 바인딩과 동일하게, 버튼 변경 -> 원하는 버튼을 누르면 저장됩니다.
+         ESC 키로 바인딩을 취소할 수 있습니다.)
+      - 컨트롤러의 공격1/공격2 버튼은 기존 좌클릭/우클릭과 동일하게 취급되어,
+        탭/홀드 판정, 무기별 방향 고정, handoff 등 기존 로직이 그대로 적용됩니다.
+      - 카메라 방향 자체(오른쪽 스틱으로 움직인 결과)는 게임 카메라를 그대로 읽어오므로
+        입력 장치와 무관하게 항상 동일하게 동작합니다.
+      - 주의: 컨트롤러 버튼 상태 조회는 REFramework의 via.hid.GamePad
+        (get_LastInputDevice -> isDown) API를 사용합니다. 이 API는 공식 문서화가
+        되어 있지 않아 게임/REFramework 버전에 따라 동작하지 않을 수 있습니다.
+        문제가 있으면 디버그 표시를 켜고 "pad error" 항목의 문구를 알려주세요.
 
     v3.3 변경점 (v3.2 대비):
       - 좌/우클릭 홀드 공격은 일정 시간 이상 누른 상태로 판정되면,
@@ -67,6 +82,16 @@ local DEFAULTS = {
     key            = 0xA4,
     key_name       = "Menu",  -- via.hid.KeyboardKey.Menu = LALT
 
+    -- 입력 장치: 1 = 키보드+마우스(KBM), 2 = 컨트롤러
+    input_device   = 1,
+
+    -- 컨트롤러 바인딩 (input_device == 2일 때 사용).
+    -- 값은 via.hid.GamePadButton의 필드 이름 문자열입니다.
+    -- 빈 문자열("")이면 아직 바인딩되지 않은 상태입니다.
+    pad_key_name   = "LTrigBottom",  -- 집중모드 기본값: L2 / LT
+    pad_atk1_name  = "RUp",          -- 공격1 기본값: △ / Y
+    pad_atk2_name  = "RRight",       -- 공격2 기본값: ○ / B
+
     smooth         = 0.35,
     yaw_offset     = 0.0,
 
@@ -102,6 +127,19 @@ local cfg = json.load_file(CFG_PATH) or {}
 for k, v in pairs(DEFAULTS) do
     if cfg[k] == nil then cfg[k] = v end
 end
+
+-- 기존 v3.9 설정 파일에서 Controller 기본값이 빈 문자열로 저장되어 있어도
+-- 새 기본값을 적용합니다. 사용자가 이미 직접 지정한 값은 그대로 보존합니다.
+if cfg.pad_key_name == nil or cfg.pad_key_name == "" then
+    cfg.pad_key_name = DEFAULTS.pad_key_name
+end
+if cfg.pad_atk1_name == nil or cfg.pad_atk1_name == "" then
+    cfg.pad_atk1_name = DEFAULTS.pad_atk1_name
+end
+if cfg.pad_atk2_name == nil or cfg.pad_atk2_name == "" then
+    cfg.pad_atk2_name = DEFAULTS.pad_atk2_name
+end
+
 
 local function save_cfg()
     json.dump_file(CFG_PATH, cfg)
@@ -208,13 +246,6 @@ local function key_down()
     return result
 end
 
-local function key_trg()
-    local now_down = key_down()
-    local trg = now_down and not key_prev_down
-    key_prev_down = now_down
-    return trg
-end
-
 local function capture_key()
     local d = get_keyboard()
     if not d or not kb_key_tdef then return false end
@@ -249,6 +280,134 @@ local function capture_key()
     return false
 end
 
+-- 바인딩 캡처를 취소하는 공용 키(ESC). 컨트롤러 버튼 바인딩 중에도
+-- 키보드 ESC로 취소할 수 있도록 공유합니다.
+local function escape_pressed()
+    local d = get_keyboard()
+    if not d then return false end
+
+    local esc = get_key_value("Escape")
+    if esc == nil then return false end
+
+    local ok, down = pcall(function()
+        return d:call("isDown", esc) == true
+    end)
+
+    return ok and down == true
+end
+
+--==========================================================================
+-- 3b. 게임패드(컨트롤러) 입력
+--==========================================================================
+
+local pad_singleton, pad_tdef, pad_button_tdef
+local pad_prev_atk1 = false
+local pad_prev_atk2 = false
+local pad_error = nil
+
+local function get_gamepad()
+    if not pad_singleton then
+        pad_singleton   = sdk.get_native_singleton("via.hid.GamePad")
+        pad_tdef        = sdk.find_type_definition("via.hid.GamePad")
+        pad_button_tdef = sdk.find_type_definition("via.hid.GamePadButton")
+    end
+
+    if not pad_singleton or not pad_tdef then
+        return nil
+    end
+
+    local ok, device = pcall(function()
+        return sdk.call_native_func(pad_singleton, pad_tdef, "get_LastInputDevice")
+    end)
+
+    if not ok then
+        pad_error = "get_LastInputDevice: " .. tostring(device)
+        return nil
+    end
+
+    return device
+end
+
+local function get_pad_button_value(name)
+    if not pad_button_tdef or not name or name == "" then return nil end
+
+    local field = pad_button_tdef:get_field(name)
+    if not field then
+        pad_error = "GamePadButton not found: " .. tostring(name)
+        return nil
+    end
+
+    local ok, value = pcall(function()
+        return field:get_data(nil)
+    end)
+
+    if not ok then
+        pad_error = "GamePadButton get_data: " .. tostring(value)
+        return nil
+    end
+
+    return value
+end
+
+local function pad_down(name)
+    local d = get_gamepad()
+    if not d then return false end
+
+    local button = get_pad_button_value(name)
+    if button == nil then return false end
+
+    local ok, result = pcall(function()
+        return d:call("isDown", button) == true
+    end)
+
+    if not ok then
+        pad_error = "pad isDown: " .. tostring(result)
+        return false
+    end
+
+    return result
+end
+
+-- 컨트롤러 버튼 하나를 바인딩합니다.
+-- ESC(키보드)를 누르면 저장하지 않고 취소만 합니다.
+-- 반환값: true면 캡처 종료(저장 또는 취소), false면 계속 대기.
+local function capture_pad_button(cfg_field)
+    if escape_pressed() then
+        return true
+    end
+
+    local d = get_gamepad()
+    if not d or not pad_button_tdef then return false end
+
+    for _, field in ipairs(pad_button_tdef:get_fields()) do
+        if field:is_static() then
+            local name = field:get_name()
+
+            local ok_value, value = pcall(function()
+                return field:get_data(nil)
+            end)
+
+            -- 0이거나 None/Any/All 같은 집합 성격의 필드는 건너뜁니다.
+            if ok_value and value ~= nil and value ~= 0 then
+                local lname = string.lower(name)
+                if lname ~= "none" and lname ~= "any" and lname ~= "all" then
+                    local ok_down, down = pcall(function()
+                        return d:call("isDown", value) == true
+                    end)
+
+                    if ok_down and down then
+                        cfg[cfg_field] = name
+                        save_cfg()
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
 --==========================================================================
 -- 4. 마우스 입력
 --==========================================================================
@@ -256,7 +415,7 @@ end
 local mouse_singleton, mouse_tdef, mouse_button_tdef
 local mouse_prev_l = false
 local mouse_prev_r = false
-local attack_held = false  -- 좌클릭 또는 우클릭을 "누르고 있는(홀드)" 상태
+local attack_held = false  -- 공격1/공격2 입력(좌우클릭 또는 컨트롤러 버튼)을 "누르고 있는(홀드)" 상태
 local mouse_error = nil
 
 local function get_mouse()
@@ -325,6 +484,21 @@ local function update_attack_input()
     attack_held  = l or r
 
     return trg_l or trg_r
+end
+
+-- 컨트롤러의 공격1/공격2 버튼을 좌/우클릭과 동일한 방식으로 추적합니다.
+local function update_pad_attack_input()
+    local a1 = pad_down(cfg.pad_atk1_name)
+    local a2 = pad_down(cfg.pad_atk2_name)
+
+    local trg1 = a1 and not pad_prev_atk1
+    local trg2 = a2 and not pad_prev_atk2
+
+    pad_prev_atk1 = a1
+    pad_prev_atk2 = a2
+    attack_held   = a1 or a2
+
+    return trg1 or trg2
 end
 
 --==========================================================================
@@ -497,7 +671,12 @@ end
 
 local focus_active = false
 local toggle_state = false
-local binding_key = false
+
+-- 바인딩 캡처 대상: nil(없음) / "kbm" / "pad_focus" / "pad_atk1" / "pad_atk2"
+local binding_target = nil
+
+-- 집중모드 버튼의 "방금 눌림" 판정에 쓰이는, 입력 장치와 무관한 공용 상태.
+local focus_prev_down = false
 
 local attack_lock_active = false
 local attack_locked_yaw = nil
@@ -646,15 +825,52 @@ local function update_activity()
 end
 
 --==========================================================================
+-- 6c. 입력 장치 통합 (집중모드 버튼)
+--==========================================================================
+
+-- cfg.input_device에 따라 KBM 키 또는 컨트롤러 버튼 중 하나로 분기합니다.
+local function focus_button_down()
+    if cfg.input_device == 2 then
+        return pad_down(cfg.pad_key_name)
+    end
+    return key_down()
+end
+
+local function focus_button_trg()
+    local now = focus_button_down()
+    local trg = now and not focus_prev_down
+    focus_prev_down = now
+    return trg
+end
+
+--==========================================================================
 -- 7. 입력 / 상태 업데이트
 --==========================================================================
 
 re.on_frame(function()
     frame_id = frame_id + 1
 
-    if binding_key then
-        if capture_key() then
-            binding_key = false
+    if binding_target then
+        local done = false
+
+        if binding_target == "kbm" then
+            done = capture_key()
+        elseif binding_target == "pad_focus" then
+            done = capture_pad_button("pad_key_name")
+            if done then focus_prev_down = false end
+        elseif binding_target == "pad_atk1" then
+            done = capture_pad_button("pad_atk1_name")
+            if done then pad_prev_atk1 = false end
+        elseif binding_target == "pad_atk2" then
+            done = capture_pad_button("pad_atk2_name")
+            if done then pad_prev_atk2 = false end
+        else
+            -- 알 수 없는 값이면 안전하게 바인딩을 종료합니다.
+            done = true
+        end
+
+        if done then
+            binding_target = nil
         end
 
         focus_active = false
@@ -669,23 +885,28 @@ re.on_frame(function()
         key_prev_down = false
         mouse_prev_l = false
         mouse_prev_r = false
+        focus_prev_down = false
+        pad_prev_atk1 = false
+        pad_prev_atk2 = false
         reset_attack_lock()
         reset_activity()
         return
     end
 
     if cfg.mode == 2 then
-        if key_trg() then
+        if focus_button_trg() then
             toggle_state = not toggle_state
         end
         focus_active = toggle_state
     else
-        focus_active = key_down()
+        focus_active = focus_button_down()
     end
 
     local attack_trg = false
     attack_held = false
-    if get_mouse() ~= nil then
+    if cfg.input_device == 2 then
+        attack_trg = update_pad_attack_input()
+    elseif get_mouse() ~= nil then
         attack_trg = update_attack_input()
     end
 
@@ -1081,6 +1302,41 @@ end)
 -- 10. UI
 --==========================================================================
 
+local PAD_DISPLAY_NAMES = {
+    -- D-Pad
+    LUp          = "D-Pad ↑",
+    LDown        = "D-Pad ↓",
+    LLeft        = "D-Pad ←",
+    LRight       = "D-Pad →",
+
+    -- Face buttons
+    RUp          = "△ / Y",
+    RRight       = "○ / B",
+    RDown        = "× / A",
+    RLeft        = "□ / X",
+
+    -- Shoulders / triggers
+    LTrigTop     = "L1 / LB",
+    LTrigBottom  = "L2 / LT",
+    RTrigTop     = "R1 / RB",
+    RTrigBottom  = "R2 / RT",
+
+    -- Stick clicks
+    LStickPush   = "L3",
+    RStickPush   = "R3",
+
+    -- Common system buttons, when exposed by the current build
+    Decide       = "확인 / A",
+    Cancel       = "취소 / B",
+}
+
+local function pad_display_name(name)
+    if not name or name == "" then
+        return "미설정"
+    end
+    return PAD_DISPLAY_NAMES[name] or tostring(name)
+end
+
 re.on_draw_ui(function()
     if not imgui.tree_node("MHR_FocusMode") then return end
 
@@ -1104,13 +1360,65 @@ re.on_draw_ui(function()
         save_cfg()
     end
 
-    imgui.text("현재 키: " .. key_display_name())
-    imgui.same_line()
+    imgui.separator()
 
-    if binding_key then
-        imgui.text("  << 아무 키나 누르세요 (ESC 취소)")
-    elseif imgui.button("키 변경") then
-        binding_key = true
+    changed, val = imgui.combo(
+        "입력 장치",
+        cfg.input_device,
+        { "키보드+마우스(KBM)", "컨트롤러" }
+    )
+    if changed then
+        cfg.input_device = val
+        binding_target = nil
+        focus_prev_down = false
+        pad_prev_atk1 = false
+        pad_prev_atk2 = false
+        reset_attack_lock()
+        save_cfg()
+    end
+
+    if cfg.input_device == 2 then
+        imgui.text(
+            "포커스 버튼: " ..
+            pad_display_name(cfg.pad_key_name)
+        )
+        imgui.same_line()
+        if binding_target == "pad_focus" then
+            imgui.text("  << 컨트롤러 버튼을 누르세요 (ESC 취소)")
+        elseif imgui.button("버튼 변경##pad_focus") then
+            binding_target = "pad_focus"
+        end
+
+        imgui.text(
+            "공격1 버튼: " ..
+            pad_display_name(cfg.pad_atk1_name)
+        )
+        imgui.same_line()
+        if binding_target == "pad_atk1" then
+            imgui.text("  << 컨트롤러 버튼을 누르세요 (ESC 취소)")
+        elseif imgui.button("버튼 변경##pad_atk1") then
+            binding_target = "pad_atk1"
+        end
+
+        imgui.text(
+            "공격2 버튼: " ..
+            pad_display_name(cfg.pad_atk2_name)
+        )
+        imgui.same_line()
+        if binding_target == "pad_atk2" then
+            imgui.text("  << 컨트롤러 버튼을 누르세요 (ESC 취소)")
+        elseif imgui.button("버튼 변경##pad_atk2") then
+            binding_target = "pad_atk2"
+        end
+    else
+        imgui.text("현재 키: " .. key_display_name())
+        imgui.same_line()
+
+        if binding_target == "kbm" then
+            imgui.text("  << 아무 키나 누르세요 (ESC 취소)")
+        elseif imgui.button("키 변경") then
+            binding_target = "kbm"
+        end
     end
 
     imgui.separator()
@@ -1138,6 +1446,10 @@ re.on_draw_ui(function()
     if cfg.debug then
         update_weapon_profile(get_player())
 
+        imgui.text(
+            "input_device: " ..
+            (cfg.input_device == 2 and "컨트롤러" or "KBM")
+        )
         imgui.text("focus_active: " .. tostring(focus_active))
         imgui.text(
             "activity_active: " ..
@@ -1196,6 +1508,9 @@ re.on_draw_ui(function()
         if mouse_error then
             imgui.text("mouse error: " .. mouse_error)
         end
+        if pad_error then
+            imgui.text("pad error: " .. pad_error)
+        end
         if last_error then
             imgui.text("last error: " .. last_error)
         end
@@ -1205,10 +1520,12 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.8] loaded. " ..
-    "BFM-type-only weapon detection, instant hold-release + persistent HUD reticle" ..
+    "[MHR_FocusMode v3.9-controller-defaults] loaded. " ..
+    "BFM-type-only weapon detection, instant hold-release + persistent HUD reticle + controller input" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
+    ", input_device=" ..
+    (cfg.input_device == 2 and "controller" or "kbm") ..
     ", key=" ..
     tostring(key_display_name()) ..
     ", lock_extension=" ..
