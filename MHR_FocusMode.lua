@@ -408,6 +408,55 @@ local function pad_down(name)
     return result
 end
 
+
+-- REFramework 내부 GamePadButton 이름을 사용자 친화적인 컨트롤러 표기로 변환합니다.
+-- 입력 처리/저장값은 변경하지 않고 UI 표시만 변환합니다.
+local function pad_display_name(name)
+    if not name or name == "" then
+        return ""
+    end
+
+    local labels = {
+        -- Face buttons
+        RUp          = "△ / Y",
+        RRight       = "○ / B",
+        RDown        = "× / A",
+        RLeft        = "□ / X",
+
+        -- Common logical aliases
+        Decide       = "× / A",
+        Cancel       = "○ / B",
+
+        -- D-pad
+        LUp          = "D-pad ↑",
+        LDown        = "D-pad ↓",
+        LLeft        = "D-pad ←",
+        LRight       = "D-pad →",
+
+        -- Stick directions
+        EmuLup       = "Left Stick ↑",
+        EmuLdown     = "Left Stick ↓",
+        EmuLleft     = "Left Stick ←",
+        EmuLright    = "Left Stick →",
+        EmuRup       = "Right Stick ↑",
+        EmuRdown     = "Right Stick ↓",
+        EmuRleft     = "Right Stick ←",
+        EmuRright    = "Right Stick →",
+
+        -- Bumpers / triggers
+        LTrigTop     = "L1 / LB",
+        LTrigBottom  = "L2 / LT",
+        RTrigTop     = "R1 / RB",
+        RTrigBottom  = "R2 / RT",
+
+        -- Stick clicks
+        LStickPush   = "L3 / LS",
+        RStickPush   = "R3 / RS",
+    }
+
+    return labels[name] or tostring(name)
+end
+
 -- 컨트롤러 버튼 하나를 바인딩합니다.
 -- ESC(키보드)를 누르면 저장하지 않고 취소만 합니다.
 -- 반환값: true면 캡처 종료(저장 또는 취소), false면 계속 대기.
@@ -1462,7 +1511,7 @@ re.on_draw_ui(function()
     if cfg.input_device == 2 then
         imgui.text(
             "집중모드 버튼: " ..
-            (cfg.pad_key_name ~= "" and cfg.pad_key_name or "미설정")
+            (cfg.pad_key_name ~= "" and pad_display_name(cfg.pad_key_name) or "미설정")
         )
         imgui.same_line()
         if binding_target == "pad_focus" then
@@ -1473,7 +1522,7 @@ re.on_draw_ui(function()
 
         imgui.text(
             "회피 버튼: " ..
-            (cfg.pad_evade_name ~= "" and cfg.pad_evade_name or "미설정")
+            (cfg.pad_evade_name ~= "" and pad_display_name(cfg.pad_evade_name) or "미설정")
         )
         imgui.same_line()
         if binding_target == "pad_evade" then
@@ -1484,7 +1533,7 @@ re.on_draw_ui(function()
 
         imgui.text(
             "공격1 버튼: " ..
-            (cfg.pad_atk1_name ~= "" and cfg.pad_atk1_name or "미설정")
+            (cfg.pad_atk1_name ~= "" and pad_display_name(cfg.pad_atk1_name) or "미설정")
         )
         imgui.same_line()
         if binding_target == "pad_atk1" then
@@ -1495,7 +1544,7 @@ re.on_draw_ui(function()
 
         imgui.text(
             "공격2 버튼: " ..
-            (cfg.pad_atk2_name ~= "" and cfg.pad_atk2_name or "미설정")
+            (cfg.pad_atk2_name ~= "" and pad_display_name(cfg.pad_atk2_name) or "미설정")
         )
         imgui.same_line()
         if binding_target == "pad_atk2" then
@@ -1560,7 +1609,7 @@ re.on_draw_ui(function()
         imgui.text(
             "evade bind: " ..
             (cfg.input_device == 2
-                and tostring(cfg.pad_evade_name or "미설정")
+                and pad_display_name(cfg.pad_evade_name or "")
                 or evade_key_display_name())
         )
         imgui.text(
