@@ -1,5 +1,5 @@
 --[[
-    MHR_FocusMode v4.1 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v4.1.6 - Focus Aim for Monster Hunter Rise (REFramework)
 
     v4.1 변경점 (v4.0 대비):
       - KBM과 컨트롤러에 회피 버튼을 각각 별도로 바인딩할 수 있습니다.
@@ -11,6 +11,16 @@
 
     v4.1 변경점:
       - 회피 입력으로 집중모드 회전을 0.7초 일시 중단하는 동안에도 크로스헤어는 계속 표시합니다.
+
+    v4.1.2 변경점:
+      - 크로스헤어 전체 두께는 유지하면서 윤곽선과 내부 채움 색상을 분리했습니다.
+      - REFramework UI에서 윤곽선/채움 색상을 각각 HSB(Hue/Saturation/Brightness)로 조절할 수 있습니다.
+      - H/S/B 슬라이더를 움직이는 즉시 크로스헤어 색상이 실시간으로 반영됩니다.
+
+    v4.1.4 변경점:
+      - 크로스헤어는 기존처럼 매 프레임 렌더링합니다.
+      - HSB -> ABGR 색상 변환은 색상 설정이 변경된 순간에만 수행하도록 캐시했습니다.
+      - 게임 프레임마다 HSB 변환을 반복하지 않아 불필요한 계산을 줄였습니다.
 
     v4.0 변경점 (v3.8 대비):
       - 입력 장치를 "키보드+마우스(KBM)" 또는 "컨트롤러"로 선택할 수 있습니다.
@@ -121,6 +131,15 @@ local DEFAULTS = {
     show_reticle   = true,   -- 집중모드 조준경 표시
     apply_rotation = true,
 
+    -- 크로스헤어 색상 (HSB / Hue 0~360, Saturation 0~100, Brightness 0~100).
+    -- 기본값: 검정 윤곽선 + 흰색 채움. (HSB 정규화 기준: 0 0 0 / 0 0 1; UI는 % 표시)
+    reticle_outline_h = 0.0,
+    reticle_outline_s = 0.0,
+    reticle_outline_b = 0.0,
+    reticle_fill_h    = 0.0,
+    reticle_fill_s    = 0.0,
+    reticle_fill_b    = 100.0,
+
     -- 무기 Timing은 항상 자동 인식.
     -- 무기가 인식되지 않을 때만 아래 Generic 값을 사용합니다.
     generic_window_seconds = 0.196,
@@ -163,8 +182,60 @@ if cfg.pad_atk2_name == nil or cfg.pad_atk2_name == "" then
     cfg.pad_atk2_name = DEFAULTS.pad_atk2_name
 end
 
+local cfg_save_error = nil
+
 local function save_cfg()
-    json.dump_file(CFG_PATH, cfg)
+    local ok, err = pcall(function()
+        json.dump_file(CFG_PATH, cfg)
+    end)
+
+    if not ok then
+        cfg_save_error = tostring(err)
+        return false
+    end
+
+    cfg_save_error = nil
+    return true
+end
+
+local function clamp(value, min_value, max_value)
+    if value < min_value then return min_value end
+    if value > max_value then return max_value end
+    return value
+end
+
+-- HSB(HSV) -> ABGR
+-- REFramework draw/imgui 색상 값에 맞춰 0xAABBGGRR 정수로 변환합니다.
+local function hsb_to_abgr(h, s, b)
+    h = (tonumber(h) or 0.0) % 360.0
+    s = clamp((tonumber(s) or 0.0) / 100.0, 0.0, 1.0)
+    b = clamp((tonumber(b) or 0.0) / 100.0, 0.0, 1.0)
+
+    local c = b * s
+    local hp = h / 60.0
+    local x = c * (1.0 - math.abs((hp % 2.0) - 1.0))
+
+    local r1, g1, b1 = 0.0, 0.0, 0.0
+    if hp < 1.0 then
+        r1, g1, b1 = c, x, 0.0
+    elseif hp < 2.0 then
+        r1, g1, b1 = x, c, 0.0
+    elseif hp < 3.0 then
+        r1, g1, b1 = 0.0, c, x
+    elseif hp < 4.0 then
+        r1, g1, b1 = 0.0, x, c
+    elseif hp < 5.0 then
+        r1, g1, b1 = x, 0.0, c
+    else
+        r1, g1, b1 = c, 0.0, x
+    end
+
+    local m = b - c
+    local r = math.floor(clamp(r1 + m, 0.0, 1.0) * 255.0 + 0.5)
+    local g = math.floor(clamp(g1 + m, 0.0, 1.0) * 255.0 + 0.5)
+    local blue = math.floor(clamp(b1 + m, 0.0, 1.0) * 255.0 + 0.5)
+
+    return 0xFF000000 + blue * 0x10000 + g * 0x100 + r
 end
 
 --==========================================================================
@@ -1370,13 +1441,36 @@ end)
 -- 9. HUD
 --==========================================================================
 -- 집중모드가 켜져 있을 때만 화면 중앙보다 살짝 아래에 작은 조준경을 표시합니다.
--- 참고 이미지 기준 약 80% 크기로 줄이고, 링은 얇은 윤곽선 2줄이 아니라
--- 실제로 흰색이 채워진 "띠"처럼 보이도록 여러 겹의 원호를 겹쳐 그립니다.
+-- 기존 전체 두께는 유지하면서, 바깥/안쪽 가장자리를 윤곽선 색으로 그리고
+-- 가운데 부분을 채움 색으로 덮어 씌웁니다.
 local FOCUS_RETICLE_Y_RATIO = 0.45
-local FOCUS_RETICLE_BASE_RADIUS = 9.4667
+local FOCUS_RETICLE_BASE_RADIUS = 7.7  -- 점과 링 사이 간격을 기존 대비 약 2/3 수준으로 축소
 local FOCUS_RETICLE_GAP_DEG = 11.0
 local FOCUS_RETICLE_SEGMENTS = 20
-local FOCUS_RETICLE_THICKNESS = 0.8667
+local FOCUS_RETICLE_THICKNESS = 2.00
+local FOCUS_RETICLE_OUTLINE_WIDTH = 1.10  -- 윤곽선 두께
+
+-- HSB -> ABGR 변환은 색상 설정이 실제로 바뀔 때만 수행합니다.
+-- HUD 자체는 매 프레임 그리되, 평소에는 캐시된 색상값을 그대로 사용합니다.
+local reticle_outline_color = 0xFF000000
+local reticle_fill_color = 0xFFFFFFFF
+
+local function refresh_reticle_colors()
+    reticle_outline_color = hsb_to_abgr(
+        cfg.reticle_outline_h,
+        cfg.reticle_outline_s,
+        cfg.reticle_outline_b
+    )
+
+    reticle_fill_color = hsb_to_abgr(
+        cfg.reticle_fill_h,
+        cfg.reticle_fill_s,
+        cfg.reticle_fill_b
+    )
+end
+
+-- 설정 파일에서 읽은 초기 HSB 값을 최초 1회만 색상으로 변환합니다.
+refresh_reticle_colors()
 
 local function draw_reticle_arc_band(cx, cy, outer_radius, thickness, start_deg, end_deg, color, scale)
     local start_rad = math.rad(start_deg)
@@ -1384,8 +1478,8 @@ local function draw_reticle_arc_band(cx, cy, outer_radius, thickness, start_deg,
     local segments = math.max(6, FOCUS_RETICLE_SEGMENTS)
     local step = (end_rad - start_rad) / segments
 
-    -- 선 하나만 그리지 않고 반지름 방향으로 여러 줄을 촘촘하게 겹쳐
-    -- 링 내부까지 흰색으로 채워진 것처럼 보이게 합니다.
+    -- 기존과 동일한 방식으로 반지름 방향에 여러 줄을 겹쳐 그려
+    -- 띠 형태의 크로스헤어를 유지합니다.
     local layers = math.max(2, math.floor(thickness * 1.8 * scale + 0.5))
     local inner_radius = math.max(0.5, outer_radius - thickness)
 
@@ -1409,6 +1503,30 @@ local function draw_reticle_arc_band(cx, cy, outer_radius, thickness, start_deg,
     end
 end
 
+local function draw_reticle_arc_band_styled(
+    cx, cy, outer_radius, thickness, start_deg, end_deg,
+    outline_color, fill_color, scale
+)
+    -- 총 두께는 기존 thickness를 그대로 사용합니다.
+    local outline_width = math.min(
+        FOCUS_RETICLE_OUTLINE_WIDTH * scale,
+        thickness * 0.45
+    )
+
+    draw_reticle_arc_band(
+        cx, cy, outer_radius, thickness,
+        start_deg, end_deg,
+        outline_color, scale
+    )
+
+    local fill_thickness = math.max(0.2, thickness - outline_width * 2.0)
+    draw_reticle_arc_band(
+        cx, cy, outer_radius - outline_width, fill_thickness,
+        start_deg, end_deg,
+        fill_color, scale
+    )
+end
+
 local function draw_focus_hud()
     -- HUD는 회피로 인한 일시중단과 무관하게 유지합니다.
     -- 집중모드가 활성 상태이거나 회피 일시중단 중이면 표시합니다.
@@ -1428,31 +1546,38 @@ local function draw_focus_hud()
     local cx = display.x * 0.5
     local cy = display.y * FOCUS_RETICLE_Y_RATIO
     local radius = FOCUS_RETICLE_BASE_RADIUS * scale
-    local thickness = math.max(1.8, FOCUS_RETICLE_THICKNESS * scale)
+    local thickness = math.max(2.8, FOCUS_RETICLE_THICKNESS * scale)
     local gap = FOCUS_RETICLE_GAP_DEG
 
-    -- 흰색
-    local color = 0xFFFFFFFF
+    -- 색상은 설정 변경 시 갱신된 캐시를 사용합니다.
+    local outline_color = reticle_outline_color
+    local fill_color = reticle_fill_color
 
     -- 좌우가 살짝 끊긴 원형 조준경.
-    draw_reticle_arc_band(
+    draw_reticle_arc_band_styled(
         cx, cy, radius, thickness,
         gap, 180.0 - gap,
-        color, scale
+        outline_color, fill_color, scale
     )
-    draw_reticle_arc_band(
+    draw_reticle_arc_band_styled(
         cx, cy, radius, thickness,
         180.0 + gap, 360.0 - gap,
-        color, scale
+        outline_color, fill_color, scale
     )
 
-    -- 중앙 조준점도 기존보다 약간 작고 또렷하게.
+    -- 중앙 조준점도 같은 윤곽선/채움 색을 사용합니다.
+    local dot_radius = math.max(2.0, 2.4 * scale)
+    local dot_outline_width = math.min(
+        FOCUS_RETICLE_OUTLINE_WIDTH * scale,
+        dot_radius * 0.35
+    )
+
     draw.filled_circle(
-        cx,
-        cy,
-        math.max(2.0, 2.4 * scale),
-        color,
-        16
+        cx, cy, dot_radius, outline_color, 16
+    )
+    draw.filled_circle(
+        cx, cy, math.max(0.5, dot_radius - dot_outline_width),
+        fill_color, 16
     )
 end
 
@@ -1487,8 +1612,6 @@ re.on_draw_ui(function()
         reset_attack_lock()
         save_cfg()
     end
-
-    imgui.separator()
 
     changed, val = imgui.combo(
         "입력 장치",
@@ -1571,14 +1694,82 @@ re.on_draw_ui(function()
         end
     end
 
-    imgui.separator()
-
     changed, val = imgui.checkbox(
         "집중모드 조준경 표시",
         cfg.show_reticle
     )
     if changed then
         cfg.show_reticle = val
+        save_cfg()
+    end
+
+    imgui.separator()
+    imgui.text("크로스헤어 색상 (HSB)")
+    imgui.text("윤곽선")
+
+    local reticle_color_changed = false
+
+    changed, val = imgui.slider_float(
+        "H##reticle_outline_h",
+        cfg.reticle_outline_h, 0.0, 360.0, "%.0f°"
+    )
+    if changed then
+        cfg.reticle_outline_h = 0.0
+        reticle_color_changed = true
+    end
+
+    changed, val = imgui.slider_float(
+        "S##reticle_outline_s",
+        cfg.reticle_outline_s, 0.0, 100.0, "%.1f%%"
+    )
+    if changed then
+        cfg.reticle_outline_s = 0.0
+        reticle_color_changed = true
+    end
+
+    changed, val = imgui.slider_float(
+        "B##reticle_outline_b",
+        cfg.reticle_outline_b, 0.0, 100.0, "%.1f%%"
+    )
+    if changed then
+        cfg.reticle_outline_b = 0.0
+        reticle_color_changed = true
+    end
+
+    imgui.text("채움")
+
+    changed, val = imgui.slider_float(
+        "H##reticle_fill_h",
+        cfg.reticle_fill_h, 0.0, 360.0, "%.0f°"
+    )
+    if changed then
+        cfg.reticle_fill_h = 0.0
+        reticle_color_changed = true
+    end
+
+    changed, val = imgui.slider_float(
+        "S##reticle_fill_s",
+        cfg.reticle_fill_s, 0.0, 100.0, "%.1f%%"
+    )
+    if changed then
+        cfg.reticle_fill_s = 0.0
+        reticle_color_changed = true
+    end
+
+    changed, val = imgui.slider_float(
+        "B##reticle_fill_b",
+        cfg.reticle_fill_b, 0.0, 100.0, "%.1f%%"
+    )
+    if changed then
+        cfg.reticle_fill_b = 100.0
+        reticle_color_changed = true
+    end
+
+    -- 슬라이더를 움직인 경우에만 HSB -> ABGR 변환을 한 번 수행합니다.
+    -- 이후 게임 프레임에서는 캐시된 색상값만 사용합니다.
+    -- 색상값은 같은 순간 JSON에도 즉시 저장합니다.
+    if reticle_color_changed then
+        refresh_reticle_colors()
         save_cfg()
     end
 
@@ -1675,14 +1866,17 @@ re.on_draw_ui(function()
         if last_error then
             imgui.text("last error: " .. last_error)
         end
+        if cfg_save_error then
+            imgui.text("config save error: " .. cfg_save_error)
+        end
     end
 
     imgui.tree_pop()
 end)
 
 log.info(
-    "[MHR_FocusMode v4.1] loaded. " ..
-    "BFM-type-only weapon detection, instant hold-release + persistent HUD reticle + controller input" ..
+    "[MHR_FocusMode v4.1.6.4] loaded. " ..
+    "BFM-type-only weapon detection, instant hold-release + HSB outline/fill HUD reticle + controller input" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
     ", input_device=" ..
