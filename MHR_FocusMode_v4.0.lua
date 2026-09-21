@@ -1,7 +1,7 @@
 --[[
-    MHR_FocusMode v3.9 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v4.0 - Focus Aim for Monster Hunter Rise (REFramework)
 
-    v3.9 변경점 (v3.8 대비):
+    v4.0 변경점 (v3.8 대비):
       - 입력 장치를 "키보드+마우스(KBM)" 또는 "컨트롤러"로 선택할 수 있습니다.
         컨트롤러를 선택하면 집중모드 버튼 / 공격1 버튼 / 공격2 버튼을
         원하는 컨트롤러 버튼으로 직접 바인딩할 수 있습니다.
@@ -88,14 +88,15 @@ local DEFAULTS = {
     -- 컨트롤러 바인딩 (input_device == 2일 때 사용).
     -- 값은 via.hid.GamePadButton의 필드 이름 문자열입니다.
     -- 빈 문자열("")이면 아직 바인딩되지 않은 상태입니다.
-    pad_key_name   = "LTrigBottom",  -- 집중모드 기본값: L2 / LT
-    pad_atk1_name  = "RUp",          -- 공격1 기본값: △ / Y
-    pad_atk2_name  = "RRight",       -- 공격2 기본값: ○ / B
+    pad_key_name   = "",  -- 집중모드 버튼 (KBM의 focus key에 대응)
+    pad_atk1_name  = "",  -- 공격1 버튼 (좌클릭에 대응)
+    pad_atk2_name  = "",  -- 공격2 버튼 (우클릭에 대응)
 
     smooth         = 0.35,
     yaw_offset     = 0.0,
 
     debug          = false,  -- 기본: 체크 해제
+    show_reticle   = true,   -- 집중모드 조준경 표시
     apply_rotation = true,
 
     -- 무기 Timing은 항상 자동 인식.
@@ -127,19 +128,6 @@ local cfg = json.load_file(CFG_PATH) or {}
 for k, v in pairs(DEFAULTS) do
     if cfg[k] == nil then cfg[k] = v end
 end
-
--- 기존 v3.9 설정 파일에서 Controller 기본값이 빈 문자열로 저장되어 있어도
--- 새 기본값을 적용합니다. 사용자가 이미 직접 지정한 값은 그대로 보존합니다.
-if cfg.pad_key_name == nil or cfg.pad_key_name == "" then
-    cfg.pad_key_name = DEFAULTS.pad_key_name
-end
-if cfg.pad_atk1_name == nil or cfg.pad_atk1_name == "" then
-    cfg.pad_atk1_name = DEFAULTS.pad_atk1_name
-end
-if cfg.pad_atk2_name == nil or cfg.pad_atk2_name == "" then
-    cfg.pad_atk2_name = DEFAULTS.pad_atk2_name
-end
-
 
 local function save_cfg()
     json.dump_file(CFG_PATH, cfg)
@@ -1249,7 +1237,7 @@ local function draw_reticle_arc_band(cx, cy, outer_radius, thickness, start_deg,
 end
 
 local function draw_focus_hud()
-    if not focus_active then
+    if not focus_active or not cfg.show_reticle then
         return
     end
 
@@ -1302,41 +1290,6 @@ end)
 -- 10. UI
 --==========================================================================
 
-local PAD_DISPLAY_NAMES = {
-    -- D-Pad
-    LUp          = "D-Pad ↑",
-    LDown        = "D-Pad ↓",
-    LLeft        = "D-Pad ←",
-    LRight       = "D-Pad →",
-
-    -- Face buttons
-    RUp          = "△ / Y",
-    RRight       = "○ / B",
-    RDown        = "× / A",
-    RLeft        = "□ / X",
-
-    -- Shoulders / triggers
-    LTrigTop     = "L1 / LB",
-    LTrigBottom  = "L2 / LT",
-    RTrigTop     = "R1 / RB",
-    RTrigBottom  = "R2 / RT",
-
-    -- Stick clicks
-    LStickPush   = "L3",
-    RStickPush   = "R3",
-
-    -- Common system buttons, when exposed by the current build
-    Decide       = "확인 / A",
-    Cancel       = "취소 / B",
-}
-
-local function pad_display_name(name)
-    if not name or name == "" then
-        return "미설정"
-    end
-    return PAD_DISPLAY_NAMES[name] or tostring(name)
-end
-
 re.on_draw_ui(function()
     if not imgui.tree_node("MHR_FocusMode") then return end
 
@@ -1380,7 +1333,7 @@ re.on_draw_ui(function()
     if cfg.input_device == 2 then
         imgui.text(
             "포커스 버튼: " ..
-            pad_display_name(cfg.pad_key_name)
+            (cfg.pad_key_name ~= "" and cfg.pad_key_name or "미설정")
         )
         imgui.same_line()
         if binding_target == "pad_focus" then
@@ -1390,8 +1343,8 @@ re.on_draw_ui(function()
         end
 
         imgui.text(
-            "공격1 버튼: " ..
-            pad_display_name(cfg.pad_atk1_name)
+            "공격1 버튼(좌클릭 대응): " ..
+            (cfg.pad_atk1_name ~= "" and cfg.pad_atk1_name or "미설정")
         )
         imgui.same_line()
         if binding_target == "pad_atk1" then
@@ -1401,8 +1354,8 @@ re.on_draw_ui(function()
         end
 
         imgui.text(
-            "공격2 버튼: " ..
-            pad_display_name(cfg.pad_atk2_name)
+            "공격2 버튼(우클릭 대응): " ..
+            (cfg.pad_atk2_name ~= "" and cfg.pad_atk2_name or "미설정")
         )
         imgui.same_line()
         if binding_target == "pad_atk2" then
@@ -1422,6 +1375,16 @@ re.on_draw_ui(function()
     end
 
     imgui.separator()
+
+    changed, val = imgui.checkbox(
+        "집중모드 조준경 표시",
+        cfg.show_reticle
+    )
+    if changed then
+        cfg.show_reticle = val
+        save_cfg()
+    end
+
     -- 공격 방향 고정 관련 세부 설정은 일반 UI에서 숨깁니다.
     -- 무기별 자동 Timing 및 공격 고정 로직은 내부에서 그대로 동작합니다.
 
@@ -1520,7 +1483,7 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v3.9-controller-defaults] loaded. " ..
+    "[MHR_FocusMode v4.0] loaded. " ..
     "BFM-type-only weapon detection, instant hold-release + persistent HUD reticle + controller input" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
