@@ -1,5 +1,16 @@
 --[[
-    MHR_FocusMode v4.0 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v4.1 - Focus Aim for Monster Hunter Rise (REFramework)
+
+    v4.1 변경점 (v4.0 대비):
+      - KBM과 컨트롤러에 회피 버튼을 각각 별도로 바인딩할 수 있습니다.
+      - KBM 기본 회피 키는 Space, 컨트롤러 기본값은 RDown입니다.
+      - 회피 버튼을 누른 순간 집중모드 회전 적용을 즉시 중단하고,
+        기본 0.700초 동안 일시정지한 뒤 집중모드를 자동 복구합니다.
+      - 회피 중 공격 고정/handoff도 회전을 덮어쓰지 않도록 차단합니다.
+      - 홀드/토글 방식 모두 동일하게 동작하며, 기존 공격/이동 로직은 유지합니다.
+
+    v4.1 변경점:
+      - 회피 입력으로 집중모드 회전을 0.7초 일시 중단하는 동안에도 크로스헤어는 계속 표시합니다.
 
     v4.0 변경점 (v3.8 대비):
       - 입력 장치를 "키보드+마우스(KBM)" 또는 "컨트롤러"로 선택할 수 있습니다.
@@ -85,12 +96,23 @@ local DEFAULTS = {
     -- 입력 장치: 1 = 키보드+마우스(KBM), 2 = 컨트롤러
     input_device   = 1,
 
+    -- 회피 버튼:
+    -- KBM 기본값 = Space
+    -- 컨트롤러 기본값 = RDown (via.hid.GamePadButton 필드 기준)
+    -- 두 입력 장치는 서로 별도로 저장/바인딩됩니다.
+    -- 기존 설정값은 그대로 유지하며 자동 보정/변환하지 않습니다.
+    evade_key_name = "Space",
+    pad_evade_name = "RDown",
+
     -- 컨트롤러 바인딩 (input_device == 2일 때 사용).
     -- 값은 via.hid.GamePadButton의 필드 이름 문자열입니다.
     -- 빈 문자열("")이면 아직 바인딩되지 않은 상태입니다.
-    pad_key_name   = "",  -- 집중모드 버튼 (KBM의 focus key에 대응)
-    pad_atk1_name  = "",  -- 공격1 버튼 (좌클릭에 대응)
-    pad_atk2_name  = "",  -- 공격2 버튼 (우클릭에 대응)
+    pad_key_name   = "LTrigBottom",  -- 집중모드 버튼 (KBM의 focus key에 대응)
+    pad_atk1_name  = "RUp",          -- 공격1 버튼 (좌클릭에 대응)
+    pad_atk2_name  = "RRight",       -- 공격2 버튼 (우클릭에 대응)
+
+    -- 회피 입력 직후 집중모드의 회전 강제를 일시 중단하는 시간.
+    evade_focus_suspend_seconds = 0.700,
 
     smooth         = 0.35,
     yaw_offset     = 0.0,
@@ -127,6 +149,18 @@ local DEFAULTS = {
 local cfg = json.load_file(CFG_PATH) or {}
 for k, v in pairs(DEFAULTS) do
     if cfg[k] == nil then cfg[k] = v end
+end
+
+-- 컨트롤러 기본 바인딩은 값이 없거나 빈 문자열일 때만 기본값으로 채웁니다.
+-- 이미 사용자가 다른 버튼을 지정한 경우에는 그대로 유지합니다.
+if cfg.pad_key_name == nil or cfg.pad_key_name == "" then
+    cfg.pad_key_name = DEFAULTS.pad_key_name
+end
+if cfg.pad_atk1_name == nil or cfg.pad_atk1_name == "" then
+    cfg.pad_atk1_name = DEFAULTS.pad_atk1_name
+end
+if cfg.pad_atk2_name == nil or cfg.pad_atk2_name == "" then
+    cfg.pad_atk2_name = DEFAULTS.pad_atk2_name
 end
 
 local function save_cfg()
@@ -172,6 +206,7 @@ local WEAPON_TIMINGS = {
 
 local kb_singleton, kb_tdef, kb_key_tdef
 local key_prev_down = false
+local key_prev_evade = false
 local input_error = nil
 
 local function get_keyboard()
@@ -207,19 +242,25 @@ local function key_display_name()
     return tostring(cfg.key_name or "Menu")
 end
 
-local function get_bound_key_value()
-    local v = get_key_value(cfg.key_name or "Menu")
+local function evade_key_display_name()
+    if cfg.evade_key_name == "Space" then return "SPACE" end
+    return tostring(cfg.evade_key_name or "Space")
+end
+
+local function get_bound_key_value(name)
+    local key_name = name or cfg.key_name or "Menu"
+    local v = get_key_value(key_name)
     if v == nil then
-        input_error = "KeyboardKey not found: " .. tostring(cfg.key_name)
+        input_error = "KeyboardKey not found: " .. tostring(key_name)
     end
     return v
 end
 
-local function key_down()
+local function key_down_for(name)
     local d = get_keyboard()
     if not d then return false end
 
-    local key = get_bound_key_value()
+    local key = get_bound_key_value(name)
     if key == nil then return false end
 
     local ok, result = pcall(function()
@@ -234,7 +275,11 @@ local function key_down()
     return result
 end
 
-local function capture_key()
+local function key_down()
+    return key_down_for(cfg.key_name or "Menu")
+end
+
+local function capture_keyboard_binding(cfg_field)
     local d = get_keyboard()
     if not d or not kb_key_tdef then return false end
 
@@ -253,8 +298,10 @@ local function capture_key()
 
                 if ok_down and down then
                     if name ~= "Escape" then
-                        cfg.key_name = name
-                        cfg.key = value
+                        cfg[cfg_field] = name
+                        if cfg_field == "key_name" then
+                            cfg.key = value
+                        end
                         save_cfg()
                     end
 
@@ -266,6 +313,10 @@ local function capture_key()
     end
 
     return false
+end
+
+local function capture_key()
+    return capture_keyboard_binding("key_name")
 end
 
 -- 바인딩 캡처를 취소하는 공용 키(ESC). 컨트롤러 버튼 바인딩 중에도
@@ -291,6 +342,7 @@ end
 local pad_singleton, pad_tdef, pad_button_tdef
 local pad_prev_atk1 = false
 local pad_prev_atk2 = false
+local pad_prev_evade = false
 local pad_error = nil
 
 local function get_gamepad()
@@ -489,6 +541,20 @@ local function update_pad_attack_input()
     return trg1 or trg2
 end
 
+local function update_evade_input()
+    if cfg.input_device == 2 then
+        local now = pad_down(cfg.pad_evade_name)
+        local trg = now and not pad_prev_evade
+        pad_prev_evade = now
+        return trg
+    end
+
+    local now = key_down_for(cfg.evade_key_name or "Space")
+    local trg = now and not key_prev_evade
+    key_prev_evade = now
+    return trg
+end
+
 --==========================================================================
 -- 5. Player / Camera / BFM Type
 --==========================================================================
@@ -666,6 +732,9 @@ local binding_target = nil
 -- 집중모드 버튼의 "방금 눌림" 판정에 쓰이는, 입력 장치와 무관한 공용 상태.
 local focus_prev_down = false
 
+-- 회피 입력 순간부터 일정 시간 동안 집중모드의 회전 적용을 차단합니다.
+local focus_suspend_remaining = 0.0
+
 local attack_lock_active = false
 local attack_locked_yaw = nil
 local attack_lock_remaining = 0.0
@@ -709,6 +778,24 @@ local function reset_attack_lock()
     attack_hold_elapsed = 0.0
     attack_is_hold = false
     attack_handoff_remaining = 0.0
+end
+
+local function start_focus_suspend()
+    focus_suspend_remaining = math.max(
+        focus_suspend_remaining,
+        math.max(0.0, cfg.evade_focus_suspend_seconds or 0.700)
+    )
+
+    -- 회피 중에는 공격 고정/handoff가 다시 회전을 덮어쓰지 않도록 정리합니다.
+    reset_attack_lock()
+end
+
+local function focus_is_suspended()
+    return focus_suspend_remaining > 0.0
+end
+
+local function reset_focus_suspend()
+    focus_suspend_remaining = 0.0
 end
 
 local function start_attack_handoff()
@@ -843,9 +930,15 @@ re.on_frame(function()
 
         if binding_target == "kbm" then
             done = capture_key()
+        elseif binding_target == "kbm_evade" then
+            done = capture_keyboard_binding("evade_key_name")
+            if done then key_prev_evade = false end
         elseif binding_target == "pad_focus" then
             done = capture_pad_button("pad_key_name")
             if done then focus_prev_down = false end
+        elseif binding_target == "pad_evade" then
+            done = capture_pad_button("pad_evade_name")
+            if done then pad_prev_evade = false end
         elseif binding_target == "pad_atk1" then
             done = capture_pad_button("pad_atk1_name")
             if done then pad_prev_atk1 = false end
@@ -863,6 +956,9 @@ re.on_frame(function()
 
         focus_active = false
         reset_attack_lock()
+        reset_focus_suspend()
+        key_prev_evade = false
+        pad_prev_evade = false
         reset_activity()
         return
     end
@@ -874,9 +970,12 @@ re.on_frame(function()
         mouse_prev_l = false
         mouse_prev_r = false
         focus_prev_down = false
+        key_prev_evade = false
         pad_prev_atk1 = false
         pad_prev_atk2 = false
+        pad_prev_evade = false
         reset_attack_lock()
+        reset_focus_suspend()
         reset_activity()
         return
     end
@@ -896,6 +995,28 @@ re.on_frame(function()
         attack_trg = update_pad_attack_input()
     elseif get_mouse() ~= nil then
         attack_trg = update_attack_input()
+    end
+
+    -- 회피 입력은 집중모드 버튼과 독립적으로 감지합니다.
+    -- 집중모드가 켜져 있을 때만 즉시 회전 적용을 중단합니다.
+    local evade_trg = update_evade_input()
+
+    if focus_active and evade_trg then
+        -- 집중모드 자체의 상태(focus_active)는 유지합니다.
+        -- 회피 동안에는 회전 적용만 일시 중단해야 크로스헤어가
+        -- 한 프레임 꺼졌다가 다시 켜지는 깜빡임이 발생하지 않습니다.
+        start_focus_suspend()
+        reset_activity()
+        return
+    end
+
+    -- 회피 직후에는 지정 시간 동안 회전 적용만 막습니다.
+    -- focus_active는 유지되므로 HUD(크로스헤어)는 끊기지 않습니다.
+    if focus_is_suspended() then
+        focus_suspend_remaining =
+            math.max(0.0, focus_suspend_remaining - get_delta_time())
+        reset_activity()
+        return
     end
 
     if not focus_active then
@@ -1089,6 +1210,7 @@ end
 
 local function apply_attack_lock_now()
     if not focus_active then return end
+    if focus_is_suspended() then return end
     if not cfg.apply_rotation then return end
     if not attack_lock_active then return end
     if attack_locked_yaw == nil then return end
@@ -1104,6 +1226,7 @@ end
 
 local function apply_attack_handoff_now()
     if not focus_active then return end
+    if focus_is_suspended() then return end
     if not cfg.apply_rotation then return end
     if attack_lock_active then return end
     if attack_handoff_remaining <= 0.0 then return end
@@ -1123,6 +1246,7 @@ end
 
 local function apply_normal_camera_now()
     if not focus_active then return end
+    if focus_is_suspended() then return end
     if not cfg.apply_rotation then return end
     if attack_lock_active then return end
     if attack_handoff_remaining > 0.0 then return end
@@ -1237,7 +1361,9 @@ local function draw_reticle_arc_band(cx, cy, outer_radius, thickness, start_deg,
 end
 
 local function draw_focus_hud()
-    if not focus_active or not cfg.show_reticle then
+    -- HUD는 회피로 인한 일시중단과 무관하게 유지합니다.
+    -- 집중모드가 활성 상태이거나 회피 일시중단 중이면 표시합니다.
+    if ((not focus_active) and (not focus_is_suspended())) or not cfg.show_reticle then
         return
     end
 
@@ -1324,15 +1450,18 @@ re.on_draw_ui(function()
         cfg.input_device = val
         binding_target = nil
         focus_prev_down = false
+        key_prev_evade = false
         pad_prev_atk1 = false
         pad_prev_atk2 = false
+        pad_prev_evade = false
         reset_attack_lock()
+        reset_focus_suspend()
         save_cfg()
     end
 
     if cfg.input_device == 2 then
         imgui.text(
-            "포커스 버튼: " ..
+            "집중모드 버튼: " ..
             (cfg.pad_key_name ~= "" and cfg.pad_key_name or "미설정")
         )
         imgui.same_line()
@@ -1343,7 +1472,18 @@ re.on_draw_ui(function()
         end
 
         imgui.text(
-            "공격1 버튼(좌클릭 대응): " ..
+            "회피 버튼: " ..
+            (cfg.pad_evade_name ~= "" and cfg.pad_evade_name or "미설정")
+        )
+        imgui.same_line()
+        if binding_target == "pad_evade" then
+            imgui.text("  << 컨트롤러 버튼을 누르세요 (ESC 취소)")
+        elseif imgui.button("버튼 변경##pad_evade") then
+            binding_target = "pad_evade"
+        end
+
+        imgui.text(
+            "공격1 버튼: " ..
             (cfg.pad_atk1_name ~= "" and cfg.pad_atk1_name or "미설정")
         )
         imgui.same_line()
@@ -1354,7 +1494,7 @@ re.on_draw_ui(function()
         end
 
         imgui.text(
-            "공격2 버튼(우클릭 대응): " ..
+            "공격2 버튼: " ..
             (cfg.pad_atk2_name ~= "" and cfg.pad_atk2_name or "미설정")
         )
         imgui.same_line()
@@ -1364,13 +1504,21 @@ re.on_draw_ui(function()
             binding_target = "pad_atk2"
         end
     else
-        imgui.text("현재 키: " .. key_display_name())
+        imgui.text("집중모드 키: " .. key_display_name())
         imgui.same_line()
 
         if binding_target == "kbm" then
             imgui.text("  << 아무 키나 누르세요 (ESC 취소)")
         elseif imgui.button("키 변경") then
             binding_target = "kbm"
+        end
+
+        imgui.text("회피 키: " .. evade_key_display_name())
+        imgui.same_line()
+        if binding_target == "kbm_evade" then
+            imgui.text("  << 아무 키나 누르세요 (ESC 취소)")
+        elseif imgui.button("키 변경##kbm_evade") then
+            binding_target = "kbm_evade"
         end
     end
 
@@ -1397,15 +1545,6 @@ re.on_draw_ui(function()
         save_cfg()
     end
 
-    changed, val = imgui.checkbox(
-        "회전 적용",
-        cfg.apply_rotation
-    )
-    if changed then
-        cfg.apply_rotation = val
-        save_cfg()
-    end
-
     if cfg.debug then
         update_weapon_profile(get_player())
 
@@ -1414,6 +1553,16 @@ re.on_draw_ui(function()
             (cfg.input_device == 2 and "컨트롤러" or "KBM")
         )
         imgui.text("focus_active: " .. tostring(focus_active))
+        imgui.text(
+            "focus suspend remaining: " ..
+            string.format("%.3f초", focus_suspend_remaining)
+        )
+        imgui.text(
+            "evade bind: " ..
+            (cfg.input_device == 2
+                and tostring(cfg.pad_evade_name or "미설정")
+                or evade_key_display_name())
+        )
         imgui.text(
             "activity_active: " ..
             tostring(activity_active) ..
@@ -1483,7 +1632,7 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v4.0] loaded. " ..
+    "[MHR_FocusMode v4.1] loaded. " ..
     "BFM-type-only weapon detection, instant hold-release + persistent HUD reticle + controller input" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
@@ -1494,5 +1643,11 @@ log.info(
     ", lock_extension=" ..
     tostring(cfg.attack_lock_extension_seconds or 0.0) ..
     ", handoff=" ..
-    tostring(cfg.attack_handoff_seconds or 0.0)
+    tostring(cfg.attack_handoff_seconds or 0.0) ..
+    ", evade_suspend=" ..
+    tostring(cfg.evade_focus_suspend_seconds or 0.700) ..
+    ", evade_kbm=" ..
+    tostring(evade_key_display_name()) ..
+    ", evade_pad=" ..
+    tostring(cfg.pad_evade_name or "")
 )
