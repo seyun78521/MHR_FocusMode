@@ -1,5 +1,5 @@
 --[[
-    MHR_FocusMode v4.1.6 - Focus Aim for Monster Hunter Rise (REFramework)
+    MHR_FocusMode v4.3.0 - Focus Aim for Monster Hunter Rise (REFramework)
 
     v4.1 변경점 (v4.0 대비):
       - KBM과 컨트롤러에 회피 버튼을 각각 별도로 바인딩할 수 있습니다.
@@ -1714,7 +1714,7 @@ re.on_draw_ui(function()
         cfg.reticle_outline_h, 0.0, 360.0, "%.0f°"
     )
     if changed then
-        cfg.reticle_outline_h = 0.0
+        cfg.reticle_outline_h = val
         reticle_color_changed = true
     end
 
@@ -1723,7 +1723,7 @@ re.on_draw_ui(function()
         cfg.reticle_outline_s, 0.0, 100.0, "%.1f%%"
     )
     if changed then
-        cfg.reticle_outline_s = 0.0
+        cfg.reticle_outline_s = val
         reticle_color_changed = true
     end
 
@@ -1732,7 +1732,7 @@ re.on_draw_ui(function()
         cfg.reticle_outline_b, 0.0, 100.0, "%.1f%%"
     )
     if changed then
-        cfg.reticle_outline_b = 0.0
+        cfg.reticle_outline_b = val
         reticle_color_changed = true
     end
 
@@ -1743,7 +1743,7 @@ re.on_draw_ui(function()
         cfg.reticle_fill_h, 0.0, 360.0, "%.0f°"
     )
     if changed then
-        cfg.reticle_fill_h = 0.0
+        cfg.reticle_fill_h = val
         reticle_color_changed = true
     end
 
@@ -1752,7 +1752,7 @@ re.on_draw_ui(function()
         cfg.reticle_fill_s, 0.0, 100.0, "%.1f%%"
     )
     if changed then
-        cfg.reticle_fill_s = 0.0
+        cfg.reticle_fill_s = val
         reticle_color_changed = true
     end
 
@@ -1761,7 +1761,7 @@ re.on_draw_ui(function()
         cfg.reticle_fill_b, 0.0, 100.0, "%.1f%%"
     )
     if changed then
-        cfg.reticle_fill_b = 100.0
+        cfg.reticle_fill_b = val
         reticle_color_changed = true
     end
 
@@ -1875,7 +1875,7 @@ re.on_draw_ui(function()
 end)
 
 log.info(
-    "[MHR_FocusMode v4.1.6.4] loaded. " ..
+    "[MHR_FocusMode v4.3.0] loaded. " ..
     "BFM-type-only weapon detection, instant hold-release + HSB outline/fill HUD reticle + controller input" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
