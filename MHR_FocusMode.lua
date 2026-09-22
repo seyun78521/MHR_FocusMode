@@ -133,12 +133,12 @@ local DEFAULTS = {
 
     -- 크로스헤어 색상 (HSB / Hue 0~360, Saturation 0~100, Brightness 0~100).
     -- 기본값: 검정 윤곽선 + 흰색 채움. (HSB 정규화 기준: 0 0 0 / 0 0 1; UI는 % 표시)
-    reticle_outline_h = 0.0,
-    reticle_outline_s = 0.0,
-    reticle_outline_b = 0.0,
-    reticle_fill_h    = 0.0,
-    reticle_fill_s    = 0.0,
-    reticle_fill_b    = 100.0,
+    reticle_outline_h = 37.0,
+    reticle_outline_s = 45.0,
+    reticle_outline_b = 22.0,
+    reticle_fill_h    = 46.0,
+    reticle_fill_s    = 43.0,
+    reticle_fill_b    = 91.0,
 
     -- 무기 Timing은 항상 자동 인식.
     -- 무기가 인식되지 않을 때만 아래 Generic 값을 사용합니다.
@@ -1444,11 +1444,11 @@ end)
 -- 기존 전체 두께는 유지하면서, 바깥/안쪽 가장자리를 윤곽선 색으로 그리고
 -- 가운데 부분을 채움 색으로 덮어 씌웁니다.
 local FOCUS_RETICLE_Y_RATIO = 0.45
-local FOCUS_RETICLE_BASE_RADIUS = 7.7  -- 점과 링 사이 간격을 기존 대비 약 2/3 수준으로 축소
+local FOCUS_RETICLE_BASE_RADIUS = 7.5  -- 점과 링 사이 간격을 기존 대비 약 2/3 수준으로 축소
 local FOCUS_RETICLE_GAP_DEG = 11.0
 local FOCUS_RETICLE_SEGMENTS = 20
-local FOCUS_RETICLE_THICKNESS = 2.00
-local FOCUS_RETICLE_OUTLINE_WIDTH = 1.10  -- 윤곽선 두께
+local FOCUS_RETICLE_THICKNESS = 1.95
+local FOCUS_RETICLE_OUTLINE_WIDTH = 0.75  -- 윤곽선 두께
 
 -- HSB -> ABGR 변환은 색상 설정이 실제로 바뀔 때만 수행합니다.
 -- HUD 자체는 매 프레임 그리되, 평소에는 캐시된 색상값을 그대로 사용합니다.
