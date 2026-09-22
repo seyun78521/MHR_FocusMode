@@ -1443,7 +1443,7 @@ end)
 -- 집중모드가 켜져 있을 때만 화면 중앙보다 살짝 아래에 작은 조준경을 표시합니다.
 -- 기존 전체 두께는 유지하면서, 바깥/안쪽 가장자리를 윤곽선 색으로 그리고
 -- 가운데 부분을 채움 색으로 덮어 씌웁니다.
-local FOCUS_RETICLE_Y_RATIO = 0.45
+local FOCUS_RETICLE_Y_RATIO = 0.5
 local FOCUS_RETICLE_BASE_RADIUS = 7.7  -- 점과 링 사이 간격을 기존 대비 약 2/3 수준으로 축소
 local FOCUS_RETICLE_GAP_DEG = 11.0
 local FOCUS_RETICLE_SEGMENTS = 20
