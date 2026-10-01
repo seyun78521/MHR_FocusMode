@@ -1,5 +1,5 @@
 --[[
-    MHR_FocusMode v4.3.1 - Monster Hunter Rise (REFramework)용 "집중 조준" 모드
+    MHR_FocusMode v4.3.2 - Monster Hunter Rise (REFramework)용 "집중 조준" 모드
 
     무엇을 하는 스크립트인가:
       집중모드 버튼을 누르고 있는 동안(또는 토글로 켠 동안) 캐릭터가 카메라가
@@ -735,26 +735,18 @@ end
 --==========================================================================
 -- 5. Player / Camera / 무기(BFM Type) 감지
 --==========================================================================
--- 현재 조작 중인 플레이어 객체를 가져옵니다. 정상 경로(getPlayer(0))가
--- 실패하면 findMasterPlayer()로 한 번 더 시도합니다.
+-- 현재 로컬 플레이어 객체를 가져옵니다.
+-- findMasterPlayer()를 사용해 현재 클라이언트가 조작하는 플레이어를 직접 찾습니다.
 local function get_player()
     local pm = sdk.get_managed_singleton("snow.player.PlayerManager")
     if not pm then return nil end
 
     local ok, player = pcall(function()
-        return pm:call("getPlayer", 0)
+        return pm:call("findMasterPlayer")
     end)
 
     if ok and player then
         return player
-    end
-
-    local ok_fallback, master = pcall(function()
-        return pm:call("findMasterPlayer")
-    end)
-
-    if ok_fallback then
-        return master
     end
 
     return nil
@@ -2088,7 +2080,7 @@ end)
 --==========================================================================
 -- REFramework 콘솔에 로드 완료와 주요 설정값을 한 번 출력합니다(문제 발생 시 초기 상태 확인용).
 log.info(
-    "[MHR_FocusMode v4.3.0] loaded. " ..
+    "[MHR_FocusMode v4.3.2] loaded. " ..
     "BFM-type-only weapon detection, instant hold-release + HSB outline/fill HUD reticle + controller input" ..
     ", activity_gate=" ..
     tostring(cfg.activity_gate) ..
@@ -2111,6 +2103,9 @@ log.info(
 --[[
     변경 이력 (요약)
 
+    v4.3.2 : 로컬 플레이어 감지를 getPlayer(0) 대신 findMasterPlayer()로 통일했습니다.
+             멀티플레이에서도 현재 클라이언트의 로컬 플레이어를 직접 찾도록 수정.
+
     v4.1.4 : HSB -> ABGR 색상 변환을 색상 설정이 바뀐 순간에만 수행하도록
              캐시했습니다. 크로스헤어 자체는 이전처럼 매 프레임 그립니다.
 
@@ -2119,7 +2114,7 @@ log.info(
 
     (참고: 이 파일에는 설정 저장 실패를 감지하는 안전장치(cfg_save_error)도
      추가되어 있지만, 소스 헤더에 이 변경에 대한 버전 기록은 없습니다.
-     로그 메시지 기준 현재 버전은 v4.3.0으로 표기되어 있습니다.)
+     로그 메시지 기준 이전 파일의 버전 표기가 v4.3.0으로 남아 있었습니다.)
 
     v4.1.1 : 회피로 인한 회전 일시정지 중에도 크로스헤어(HUD)는 계속 표시.
 
