@@ -1,9 +1,5 @@
 # MHR Focus Mode
 
-Focus Mode-style attack direction control for Monster Hunter Rise.
-
-## Features
-
 - Camera-based attack direction control
 - Toggle and Hold modes
 - Custom key bindings
