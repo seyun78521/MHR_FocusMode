@@ -1,10 +1,24 @@
 # MHR Focus Mode
 
+Focus Mode-style attack direction control for Monster Hunter Rise.
+
+## Features
+
+- Camera-based attack direction control
+- Toggle and Hold modes
+- Custom key bindings
+- Keyboard/Mouse and Controller support
+- Crosshair while Focus Mode is active
+- Co-op support
+
+> Ranged weapons are not recommended.
+
+## Credits
+
 This project was inspired by the following Monster Hunter World mods:
 
-KhongaFTW's [**MH World Focus Mode**](https://www.nexusmods.com/monsterhunterworld/mods/8429)
-
-GreedyBeruu's [**Better Focus Mode**](https://www.nexusmods.com/monsterhunterworld/mods/8551)
+- [**MH World Focus Mode**](https://www.nexusmods.com/monsterhunterworld/mods/8429) by **KhongaFTW**
+- [**Better Focus Mode**](https://www.nexusmods.com/monsterhunterworld/mods/8551) by **GreedyBeruu**
 
 I did not receive permission from the original developers.
 If either creator has any concerns about this project, please contact me.
@@ -13,8 +27,8 @@ This mod is shared for free and is not intended for financial gain.
 
 ## Author
 
-Created and maintained by **@seyun78521**
+**[@seyun78521](https://github.com/seyun78521)**
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT License](LICENSE)
